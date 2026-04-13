@@ -1,0 +1,21 @@
+# Tuned for 16GB RAM dev machine
+# ES heap: 2g (not the default 50% of system RAM)
+# To start: docker compose --env-file ../.env up -d
+
+services:
+  elasticsearch:
+    image: elasticsearch:9.0.1
+    container_name: elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=true
+      - ELASTIC_PASSWORD=${ES_PASSWORD}
+      - ES_JAVA_OPTS=-Xms2g -Xmx2g
+    ports:
+      - "9200:9200"
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+    mem_limit: 4g
+
+volumes:
+  esdata:
