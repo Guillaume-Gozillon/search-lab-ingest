@@ -22,9 +22,9 @@ def parse_price(raw: str | None) -> float | None:
         return None
 
 
-def clean_details(raw: dict | None) -> dict | None:
+def clean_details(raw: dict | str | None) -> dict | None:
     """Strip whitespace from keys, drop entries where the value is None or empty."""
-    if not raw:
+    if not raw or not isinstance(raw, dict):
         return None
     cleaned = {
         k.strip(): v
