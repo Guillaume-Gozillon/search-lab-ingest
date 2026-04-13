@@ -4,6 +4,8 @@ import logging
 import sys
 from pathlib import Path
 
+from elasticsearch import Elasticsearch
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config
 from es.client import build_es_client
@@ -11,7 +13,7 @@ from es.client import build_es_client
 logger = logging.getLogger(__name__)
 
 
-def _get_segment_count(client, index: str) -> int:
+def _get_segment_count(client: Elasticsearch, index: str) -> int:
     """Return the total number of segments across all shards."""
     stats = client.indices.stats(index=index)
     return stats["_all"]["primaries"]["segments"]["count"]

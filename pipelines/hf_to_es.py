@@ -3,9 +3,12 @@
 import argparse
 import logging
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 from datasets import load_dataset
+from datasets.iterable_dataset import IterableDataset
+from elasticsearch import Elasticsearch
 from elasticsearch.helpers import streaming_bulk
 from tqdm import tqdm
 
@@ -16,10 +19,14 @@ from transforms.product import transform
 
 logger = logging.getLogger(__name__)
 
-MAPPING_PATH = Path(__file__).resolve().parent.parent / "mappings" / "products_home_kitchen_v1.json"
+MAPPING_PATH = (
+    Path(__file__).resolve().parent.parent
+    / "mappings"
+    / "products_home_kitchen_v1.json"
+)
 
 
-def document_stream(dataset, limit: int | None):
+def document_stream(dataset: IterableDataset, limit: int | None) -> Iterator[dict]:
     """Yield transformed documents from the HuggingFace dataset.
 
     Logs the number of skipped records at the end.
@@ -40,7 +47,7 @@ def document_stream(dataset, limit: int | None):
     logger.info("Stream finished — emitted %d, skipped %d", emitted, skipped)
 
 
-def _log_field_coverage(client) -> None:
+def _log_field_coverage(client: Elasticsearch) -> None:
     """Log the percentage of documents that have price, description, and rating."""
     resp = client.search(
         index=config.INDEX_NAME,
@@ -85,7 +92,7 @@ def run(dry_run: bool = False, limit: int | None = None) -> None:
     _run_bulk(client, dataset, limit)
 
 
-def _run_dry(dataset, limit: int | None) -> None:
+def _run_dry(dataset: IterableDataset, limit: int | None) -> None:
     """Transform without indexing — useful for validating the pipeline."""
     count = 0
     for doc in tqdm(document_stream(dataset, limit), desc="dry-run"):
@@ -93,7 +100,9 @@ def _run_dry(dataset, limit: int | None) -> None:
     logger.info("Dry run complete — %d documents would be indexed", count)
 
 
-def _run_bulk(client, dataset, limit: int | None) -> None:
+def _run_bulk(
+    client: Elasticsearch, dataset: IterableDataset, limit: int | None
+) -> None:
     """Stream documents into Elasticsearch via streaming_bulk."""
     indexed = 0
     errors: list[dict] = []
@@ -131,8 +140,12 @@ if __name__ == "__main__":
     )
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dry-run", action="store_true", help="Transform without indexing")
-    parser.add_argument("--limit", type=int, default=None, help="Max documents to process")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Transform without indexing"
+    )
+    parser.add_argument(
+        "--limit", type=int, default=None, help="Max documents to process"
+    )
     args = parser.parse_args()
 
     run(dry_run=args.dry_run, limit=args.limit)

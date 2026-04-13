@@ -23,7 +23,9 @@ def build_es_client() -> Elasticsearch:
     if config.ES_CA_CERT:
         kwargs["ca_certs"] = config.ES_CA_CERT
     else:
-        logger.warning("No CA certificate configured — TLS verification disabled (local dev only)")
+        logger.warning(
+            "No CA certificate configured — TLS verification disabled (local dev only)"
+        )
         kwargs["verify_certs"] = False
         kwargs["ssl_show_warn"] = False
 

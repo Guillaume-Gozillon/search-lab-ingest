@@ -27,9 +27,7 @@ def clean_details(raw: dict | str | None) -> dict | None:
     if not raw or not isinstance(raw, dict):
         return None
     cleaned = {
-        k.strip(): v
-        for k, v in raw.items()
-        if v is not None and str(v).strip() != ""
+        k.strip(): v for k, v in raw.items() if v is not None and str(v).strip() != ""
     }
     return cleaned or None
 
