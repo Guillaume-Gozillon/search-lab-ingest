@@ -48,16 +48,25 @@ def _versioned_index() -> str:
 
 def download_from_kaggle(dest: Path) -> Path:
     """Download the dataset from Kaggle and return the path to the CSV."""
+    import shutil
+
     import kagglehub
 
     logger.info("Downloading dataset from Kaggle: %s", KAGGLE_DATASET)
     dataset_dir = Path(kagglehub.dataset_download(KAGGLE_DATASET))
-    csv_files = list(dataset_dir.glob("*.csv"))
-    if not csv_files:
-        raise FileNotFoundError(f"No CSV found in downloaded dataset at {dataset_dir}")
-    src = csv_files[0]
+
+    src = dataset_dir / "amazon_products.csv"
+    if not src.exists():
+        csv_files = list(dataset_dir.glob("*.csv"))
+        if not csv_files:
+            raise FileNotFoundError(
+                f"No CSV found in downloaded dataset at {dataset_dir}"
+            )
+        src = csv_files[0]
+        logger.warning("amazon_products.csv not found, using %s", src.name)
+
     dest.parent.mkdir(parents=True, exist_ok=True)
-    src.rename(dest)
+    shutil.copy2(src, dest)
     logger.info("Dataset saved to %s", dest)
     return dest
 
