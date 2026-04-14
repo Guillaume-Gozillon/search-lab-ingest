@@ -6,9 +6,9 @@ from pathlib import Path
 
 from elasticsearch import Elasticsearch
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import config
-from es.client import build_es_client
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+from shared import config
+from shared.es.client import build_es_client
 
 logger = logging.getLogger(__name__)
 

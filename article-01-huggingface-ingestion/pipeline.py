@@ -12,18 +12,18 @@ from elasticsearch import Elasticsearch
 from elasticsearch.helpers import streaming_bulk
 from tqdm import tqdm
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import config
-from es.client import build_es_client, ensure_index
+repo_root = Path(__file__).resolve().parent.parent
+article_root = Path(__file__).resolve().parent
+sys.path.insert(0, str(repo_root))
+sys.path.insert(0, str(article_root))
+
+from shared import config
+from shared.es.client import build_es_client, ensure_index
 from transforms.product import transform
 
 logger = logging.getLogger(__name__)
 
-MAPPING_PATH = (
-    Path(__file__).resolve().parent.parent
-    / "mappings"
-    / "products_home_kitchen_v1.json"
-)
+MAPPING_PATH = Path(__file__).resolve().parent / "mappings" / "products_home_kitchen_v1.json"
 
 
 def document_stream(dataset: IterableDataset, limit: int | None) -> Iterator[dict]:

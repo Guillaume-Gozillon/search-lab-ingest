@@ -5,8 +5,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import config
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+from shared import config
 
 
 def parse_price(raw: str | None) -> float | None:

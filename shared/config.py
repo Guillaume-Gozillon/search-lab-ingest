@@ -5,7 +5,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).resolve().parent / ".env")
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 ES_HOST: str = os.getenv("ES_HOST", "https://localhost:9200")
 ES_USER: str = os.getenv("ES_USER", "elastic")

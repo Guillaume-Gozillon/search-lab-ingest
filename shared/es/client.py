@@ -7,8 +7,8 @@ from pathlib import Path
 
 from elasticsearch import Elasticsearch
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import config
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+from shared import config
 
 logger = logging.getLogger(__name__)
 

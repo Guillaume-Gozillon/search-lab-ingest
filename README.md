@@ -3,6 +3,8 @@
 Data engineering pipelines for ingesting product data into Elasticsearch 9.x.
 Sibling of [search-lab](../search-lab) (Node.js / TypeScript — queries & aggregations).
 
+Each article in this repo explores a different ingestion approach or technique.
+
 ## Prerequisites
 
 - Docker Desktop
@@ -23,50 +25,31 @@ cp .env.example .env   # fill in ES_PASSWORD
 docker compose -f docker/docker-compose.yml --env-file .env up -d
 ```
 
-Elasticsearch will be available at `https://localhost:9200`, Kibana at `http://localhost:5601`.
+Elasticsearch will be available at `https://localhost:9200`.
 
-## Verify connection
+## Articles
 
-```bash
-python -c "import config; from es.client import build_es_client; build_es_client()"
-```
-
-## Run the pipeline
-
-Dry run (transform only, no indexing):
-
-```bash
-python pipelines/hf_to_es.py --dry-run --limit 100
-```
-
-Full ingestion:
-
-```bash
-python pipelines/hf_to_es.py
-```
+| Folder | Topic |
+|--------|-------|
+| [article-01-huggingface-ingestion](./article-01-huggingface-ingestion) | Stream product metadata from HuggingFace into ES |
 
 ## Project structure
 
 ```
 search-lab-ingest/
-├── pipelines/                  # one file per data source
-│   └── hf_to_es.py             # HuggingFace → ES
-├── transforms/                 # pure functions: raw record → ES document
-│   └── product.py
-├── mappings/                   # ES index mappings (JSON)
-│   └── products_home_kitchen_v1.json
-├── es/                         # ES client + index helpers
-│   └── client.py
-├── operations/                 # post-ingestion operations
-│   └── forcemerge.py
-├── notebooks/                  # Jupyter exploration
+├── shared/                         # shared across all articles
+│   ├── config.py                   # central config (env vars)
+│   └── es/
+│       └── client.py               # ES client factory + index helpers
+├── article-01-huggingface-ingestion/
+│   ├── mappings/                   # ES index mappings
+│   ├── transforms/                 # raw record → ES document
+│   ├── operations/                 # post-ingestion operations
+│   └── pipeline.py                 # main entry point
 ├── docker/
 │   └── docker-compose.yml
-├── config.py
 ├── .env.example
-├── .gitignore
-├── requirements.txt
-└── README.md
+└── requirements.txt
 ```
 
 ## Ecosystem
