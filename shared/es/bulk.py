@@ -96,27 +96,3 @@ def forcemerge(client: Elasticsearch, index: str, max_num_segments: int = 1) -> 
     stats = client.indices.stats(index=index)
     after = stats["_all"]["primaries"]["segments"]["count"]
     logger.info("Segments after merge: %d", after)
-
-
-def get_current_index(client: Elasticsearch, alias: str) -> str | None:
-    """Return the index currently behind an alias, or None if the alias doesn't exist."""
-    if not client.indices.exists_alias(name=alias):
-        return None
-    aliases = client.indices.get_alias(name=alias)
-    return next(iter(aliases))
-
-
-def update_alias(
-    client: Elasticsearch,
-    alias: str,
-    new_index: str,
-    old_index: str | None = None,
-) -> None:
-    """Atomically swap an alias to new_index (removes old_index binding if provided)."""
-    actions: list[dict] = []
-    if old_index:
-        actions.append({"remove": {"index": old_index, "alias": alias}})
-    actions.append({"add": {"index": new_index, "alias": alias}})
-
-    client.indices.update_aliases(actions=actions)
-    logger.info("Alias '%s' → '%s'", alias, new_index)
