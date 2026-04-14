@@ -8,35 +8,13 @@ from pathlib import Path
 from elasticsearch import Elasticsearch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-from shared import config
+from shared.config import ES_URL
 
 logger = logging.getLogger(__name__)
 
 
 def build_es_client() -> Elasticsearch:
-    """Create an Elasticsearch client from config and verify the connection."""
-    kwargs: dict = {
-        "hosts": [config.ES_HOST],
-        "basic_auth": (config.ES_USER, config.ES_PASSWORD),
-    }
-
-    if config.ES_CA_CERT:
-        kwargs["ca_certs"] = config.ES_CA_CERT
-    else:
-        logger.warning(
-            "No CA certificate configured — TLS verification disabled (local dev only)"
-        )
-        kwargs["verify_certs"] = False
-        kwargs["ssl_show_warn"] = False
-
-    client = Elasticsearch(**kwargs)
-    info = client.info()
-    logger.info(
-        "Connected to cluster '%s' (Elasticsearch %s)",
-        info["cluster_name"],
-        info["version"]["number"],
-    )
-    return client
+    return Elasticsearch(ES_URL)
 
 
 def ensure_index(client: Elasticsearch, index: str, mapping_path: str) -> None:

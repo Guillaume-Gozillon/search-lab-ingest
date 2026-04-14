@@ -31,21 +31,22 @@ Elasticsearch will be available at `https://localhost:9200`.
 
 | Folder | Topic |
 |--------|-------|
-| [article-01-huggingface-ingestion](./article-01-huggingface-ingestion) | Stream product metadata from HuggingFace into ES |
+| [article-01-csv-bulk-ingestion](./article-01-csv-bulk-ingestion) | Bulk-index a 1.4M-row Kaggle CSV into ES with pandas |
 
 ## Project structure
 
 ```
 search-lab-ingest/
-├── shared/                         # shared across all articles
-│   ├── config.py                   # central config (env vars)
+├── shared/                              # shared across all articles
+│   ├── config.py                        # central config (env vars)
 │   └── es/
-│       └── client.py               # ES client factory + index helpers
-├── article-01-huggingface-ingestion/
-│   ├── mappings/                   # ES index mappings
-│   ├── transforms/                 # raw record → ES document
-│   ├── operations/                 # post-ingestion operations
-│   └── pipeline.py                 # main entry point
+│       ├── client.py                    # ES client factory + index helpers
+│       └── bulk.py                      # bulk_index, update_alias, optimize_for_import, forcemerge
+├── article-01-csv-bulk-ingestion/
+│   ├── data/                            # gitignored — put CSV here
+│   ├── mappings/                        # ES index mappings
+│   ├── transforms/                      # raw row → ES document
+│   └── pipeline.py                      # main entry point
 ├── docker/
 │   └── docker-compose.yml
 ├── .env.example
