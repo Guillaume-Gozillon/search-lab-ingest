@@ -77,6 +77,7 @@ def document_stream(csv_path: Path, limit: int | None) -> Iterator[dict]:
             if doc is None:
                 skipped += 1
                 continue
+            doc["_index"] = config.ES_INDEX
             emitted += 1
             yield doc
 

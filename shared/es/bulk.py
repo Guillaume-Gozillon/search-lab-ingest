@@ -91,7 +91,7 @@ def forcemerge(client: Elasticsearch, index: str, max_num_segments: int = 1) -> 
     logger.info(
         "Running force merge on '%s' (max_num_segments=%d)…", index, max_num_segments
     )
-    client.indices.forcemerge(index=index, max_num_segments=max_num_segments)
+    client.indices.forcemerge(index=index, max_num_segments=max_num_segments, request_timeout=300)
 
     stats = client.indices.stats(index=index)
     after = stats["_all"]["primaries"]["segments"]["count"]
