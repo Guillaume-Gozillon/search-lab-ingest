@@ -1,28 +1,28 @@
-# Ingérer 1,4 million de produits Amazon dans Elasticsearch en moins de 90 secondes avec Python et pandas
+# Indexing 1.4 Million Amazon Products into Elasticsearch in Under 90 Seconds with Python and pandas
 
-*Un guide pratique pour construire un pipeline d'ingestion CSV robuste et performant*
-
----
-
-Quand on commence à travailler sérieusement avec Elasticsearch, la question de l'ingestion de données se pose rapidement. Les tutoriels montrent souvent quelques dizaines de documents. Mais en production — ou même pour des expérimentations réalistes — on parle de centaines de milliers, voire de millions d'enregistrements.
-
-Dans cet article, je vais vous montrer comment j'ai ingéré **1,4 million de produits Amazon** dans Elasticsearch 9.x en **moins de 90 secondes**, avec Python, pandas et quelques optimisations bien choisies. Le code est propre, modulaire, et réutilisable pour n'importe quel dataset CSV.
+*A practical guide to building a robust and performant CSV ingestion pipeline*
 
 ---
 
-## Contexte : pourquoi ce projet ?
+When you start working seriously with Elasticsearch, the question of data ingestion comes up quickly. Tutorials usually show a few dozen documents. But in production — or even for realistic experiments — you're dealing with hundreds of thousands, sometimes millions of records.
 
-Ce pipeline fait partie d'un écosystème que j'appelle **search-lab** — un ensemble de repos compagnons pour explorer les capacités d'Elasticsearch à travers des articles Medium. L'idée : travailler avec des données réalistes, pas des exemples jouets.
-
-Le dataset choisi est l'**Amazon Products Dataset 2023** disponible sur Kaggle : 1,4 million de produits, environ 300 MB en CSV. Il contient exactement ce qu'on veut pour tester un moteur de recherche — des titres textuels, des prix, des notes, des catégories.
-
-Pourquoi Elasticsearch plutôt qu'une base SQL ? Parce que la recherche full-text, le scoring par pertinence, et les agrégations analytiques sont des cas où ES excelle nativement. Un `SELECT WHERE title LIKE '%coffee maker%'` ne vous donnera jamais la même qualité de résultats qu'une recherche ES avec l'analyseur `english`.
+In this article, I'll show you how I indexed **1.4 million Amazon products** into Elasticsearch 9.x in **under 90 seconds**, using Python, pandas, and a few well-chosen optimizations. The code is clean, modular, and reusable for any CSV dataset.
 
 ---
 
-## 1. Le setup Docker : simple et reproductible
+## Context: why this project?
 
-Première décision : faire tourner ES en local sans friction. Docker est la réponse évidente. Voici le `docker-compose.yml` que j'utilise :
+This pipeline is part of an ecosystem I call **search-lab** — a set of companion repositories for exploring Elasticsearch's capabilities through Medium articles. The idea: work with realistic data, not toy examples.
+
+The chosen dataset is the **Amazon Products Dataset 2023** available on Kaggle: 1.4 million products, around 300 MB as a CSV. It contains exactly what you want to test a search engine — text titles, prices, ratings, categories.
+
+Why Elasticsearch over a SQL database? Because full-text search, relevance scoring, and analytical aggregations are cases where ES excels natively. A `SELECT WHERE title LIKE '%coffee maker%'` will never give you the same quality of results as an ES search with the `english` analyzer.
+
+---
+
+## 1. Docker setup: simple and reproducible
+
+First decision: run ES locally without friction. Docker is the obvious answer. Here's the `docker-compose.yml` I use:
 
 ```yaml
 services:
@@ -53,11 +53,11 @@ services:
     mem_limit: 1g
 ```
 
-Quelques choix délibérés :
+A few deliberate choices:
 
-- **`xpack.security.enabled=false`** : En développement local, la sécurité ajoute de la complexité sans valeur. On l'active en production, pas pour des expérimentations.
-- **`ES_JAVA_OPTS=-Xms2g -Xmx2g`** : On fixe le heap JVM à 2 GB. La règle empirique ES : ne jamais dépasser 50% de la RAM disponible pour le heap, et rester sous 32 GB.
-- **`healthcheck` avec condition** : Kibana ne démarre qu'une fois ES réellement prêt. Ça évite les race conditions au boot.
+- **`xpack.security.enabled=false`**: In local development, security adds complexity without value. Enable it in production, not for experiments.
+- **`ES_JAVA_OPTS=-Xms2g -Xmx2g`**: We fix the JVM heap at 2 GB. The ES rule of thumb: never exceed 50% of available RAM for the heap, and stay under 32 GB.
+- **`healthcheck` with condition**: Kibana only starts once ES is truly ready. This avoids boot race conditions.
 
 ```bash
 docker compose -f docker/docker-compose.yml up -d
@@ -65,9 +65,9 @@ docker compose -f docker/docker-compose.yml up -d
 
 ---
 
-## 2. Le mapping : définir le contrat de données
+## 2. The mapping: defining the data contract
 
-Avant d'ingérer quoi que ce soit, il faut définir le **mapping** — c'est-à-dire le schéma de l'index. C'est l'une des décisions les plus importantes, et elle est difficile à changer après coup.
+Before indexing anything, you need to define the **mapping** — the index schema. It's one of the most important decisions, and a hard one to change after the fact.
 
 ```json
 {
@@ -91,19 +91,19 @@ Avant d'ingérer quoi que ce soit, il faut définir le **mapping** — c'est-à-
 }
 ```
 
-Expliquons chaque choix :
+Let's walk through each choice:
 
-**`dynamic: strict`** — Tout champ non déclaré dans le mapping provoque une erreur d'indexation. En mode `dynamic: true` (le défaut), ES infère les types automatiquement, ce qui peut mener à des surprises — un champ numérique inféré comme `long` alors qu'on voulait `float`. Avec `strict`, on garde le contrôle total.
+**`dynamic: strict`** — Any field not declared in the mapping causes an indexing error. In `dynamic: true` mode (the default), ES infers types automatically, which can lead to surprises — a numeric field inferred as `long` when you wanted `float`. With `strict`, you keep full control.
 
-**`keyword` vs `text`** — Le champ `title` est en `text` avec l'analyseur `english` : il sera tokenisé, les stop words retirés, les mots ramenés à leur racine (*stemming*). Parfait pour la recherche full-text. L'`asin` en revanche est en `keyword` : on veut des correspondances exactes, pas de tokenisation.
+**`keyword` vs `text`** — The `title` field is `text` with the `english` analyzer: it will be tokenized, stop words removed, words reduced to their root (*stemming*). Perfect for full-text search. `asin`, on the other hand, is `keyword`: we want exact matches, no tokenization.
 
-**`index: false` sur les URLs** — `imgUrl` et `productURL` ne seront jamais utilisés pour filtrer ou rechercher. On les stocke pour les récupérer dans les résultats, mais on dit explicitement à ES de ne pas les indexer. Ça économise de l'espace disque et de la mémoire.
+**`index: false` on URLs** — `imgUrl` and `productURL` will never be used for filtering or searching. We store them to retrieve in results, but we explicitly tell ES not to index them. This saves disk space and memory.
 
 ---
 
-## 3. La transformation des données : gérer la réalité du CSV
+## 3. Data transformation: handling the reality of CSV files
 
-Un CSV de 300 MB, c'est rarement propre. Pandas charge les cellules vides comme `NaN` (un float en Python), les nombres peuvent être stockés comme strings, et certaines lignes sont incomplètes. La fonction de transformation est le seul endroit où on traite tout ça.
+A 300 MB CSV is rarely clean. Pandas loads empty cells as `NaN` (a Python float), numbers can be stored as strings, and some rows are incomplete. The transform function is the single place where all of this gets handled.
 
 ```python
 import math
@@ -118,7 +118,7 @@ def _clean(value):
 def transform(row: dict) -> dict | None:
     asin = _clean(row.get("asin"))
     if not asin:
-        return None  # ligne invalide, on skip
+        return None  # invalid row, skip it
 
     return {
         "_id": str(asin),
@@ -131,20 +131,20 @@ def transform(row: dict) -> dict | None:
     }
 ```
 
-Points importants :
+Key points:
 
-- **`_clean` gère le NaN pandas** : `math.isnan()` ne fonctionne que sur les floats, d'où le `isinstance` guard.
-- **`transform` retourne `None`** pour les lignes sans ASIN — le pipeline les ignore silencieusement.
-- **`_id` = ASIN** : On utilise l'identifiant métier comme `_id` ES. Ça rend les ré-ingestions idempotentes — un même document réindexé écrase l'ancien au lieu de créer un doublon.
-- **Fonctions pures sans effets de bord** : `transform` ne touche à rien d'externe. Ça facilite les tests unitaires et le debug.
+- **`_clean` handles pandas NaN**: `math.isnan()` only works on floats, hence the `isinstance` guard.
+- **`transform` returns `None`** for rows without an ASIN — the pipeline skips them silently.
+- **`_id` = ASIN**: We use the business identifier as the ES `_id`. This makes re-ingestions idempotent — re-indexing the same document overwrites the previous one instead of creating a duplicate.
+- **Pure functions with no side effects**: `transform` touches nothing external. This makes unit testing and debugging straightforward.
 
 ---
 
-## 4. Le pipeline : streamer sans exploser la mémoire
+## 4. The pipeline: streaming without blowing up memory
 
-300 MB en CSV, c'est faisable en RAM. Mais 3 GB ? 30 GB ? Le principe de base : **ne jamais charger le fichier entier en mémoire**.
+300 MB of CSV is manageable in RAM. But 3 GB? 30 GB? The fundamental principle: **never load the entire file into memory**.
 
-Pandas supporte la lecture par chunks avec `read_csv(..., chunksize=10_000)`. Combiné avec un générateur Python, on obtient un stream de documents qui ne chargera jamais plus de 10 000 lignes à la fois :
+Pandas supports chunk reading with `read_csv(..., chunksize=10_000)`. Combined with a Python generator, you get a document stream that never loads more than 10,000 rows at a time:
 
 ```python
 def document_stream(csv_path, limit=None):
@@ -159,15 +159,15 @@ def document_stream(csv_path, limit=None):
             yield doc
 ```
 
-Le paramètre `--limit` est précieux en développement : tester avec 1 000 documents avant de lancer l'ingestion complète évite bien des mauvaises surprises.
+The `--limit` flag is invaluable in development: testing with 1,000 documents before running the full ingestion saves a lot of painful surprises.
 
 ---
 
-## 5. Les optimisations bulk : là où le gain de performance se joue
+## 5. Bulk optimizations: where the real performance gains happen
 
-C'est la partie la plus intéressante. Sans optimisation, ES indexe chaque document en temps réel : il écrit le segment, le refresh rend le doc visible, les réplicas se synchronisent. Multiplié par 1,4 million de documents, c'est catastrophiquement lent.
+This is the most interesting part. Without optimization, ES indexes each document in real time: it writes the segment, the refresh makes the doc visible, replicas sync. Multiplied by 1.4 million documents, this is catastrophically slow.
 
-Avant de lancer l'ingestion :
+Before starting the ingestion:
 
 ```python
 def optimize_for_import(client, index):
@@ -177,11 +177,11 @@ def optimize_for_import(client, index):
     )
 ```
 
-**`refresh_interval: -1`** — Par défaut, ES refresh l'index toutes les secondes pour rendre les nouveaux documents visibles aux recherches. C'est coûteux : ça force la création de nouveaux segments Lucene. En désactivant complètement le refresh pendant l'ingestion, ES peut écrire en mémoire et flusher sur disque bien plus efficacement.
+**`refresh_interval: -1`** — By default, ES refreshes the index every second to make new documents visible to searches. This is expensive: it forces the creation of new Lucene segments. By completely disabling refresh during ingestion, ES can write to memory and flush to disk far more efficiently.
 
-**`number_of_replicas: 0`** — Chaque réplica reçoit une copie de chaque document indexé. En bulk import, les réplicas sont du travail supplémentaire sans bénéfice immédiat. On les remet à 1 après.
+**`number_of_replicas: 0`** — Each replica receives a copy of every indexed document. During a bulk import, replicas are extra work with no immediate benefit. We restore them to 1 afterwards.
 
-Après l'ingestion, on restaure les settings normaux :
+After ingestion, we restore normal settings:
 
 ```python
 def restore_after_import(client, index):
@@ -194,14 +194,14 @@ def restore_after_import(client, index):
 
 ---
 
-## 6. `streaming_bulk` : pourquoi pas le bulk classique ?
+## 6. `streaming_bulk`: why not classic bulk?
 
-La librairie `elasticsearch-py` propose deux approches pour l'indexation en masse :
+The `elasticsearch-py` library offers two approaches for mass indexing:
 
-- **`bulk`** : prend une liste complète de documents, la sérialise, l'envoie en une requête.
-- **`streaming_bulk`** : consomme un itérateur, envoie des batches au fil de l'eau.
+- **`bulk`**: takes a complete list of documents, serializes it, sends it in one request.
+- **`streaming_bulk`**: consumes an iterator, sends batches on the fly.
 
-Avec 1,4 million de documents, `bulk` classique signifierait construire la liste entière en mémoire avant d'envoyer quoi que ce soit. `streaming_bulk` consomme le générateur chunk par chunk (`chunk_size=2000`) : la mémoire reste stable quelle que soit la taille du dataset.
+With 1.4 million documents, classic `bulk` would mean building the entire list in memory before sending anything. `streaming_bulk` consumes the generator chunk by chunk (`chunk_size=2000`): memory usage stays constant regardless of dataset size.
 
 ```python
 for ok, result in streaming_bulk(
@@ -213,41 +213,41 @@ for ok, result in streaming_bulk(
         errors.append(result)
 ```
 
-`raise_on_error=False` permet de collecter les erreurs sans interrompre le pipeline. On les logue à la fin plutôt que de tout arrêter pour un document mal formé.
+`raise_on_error=False` lets us collect errors without interrupting the pipeline. We log them at the end rather than stopping everything for one malformed document.
 
 ---
 
-## 7. Le forcemerge : l'étape qu'on oublie souvent
+## 7. Force merge: the step everyone forgets
 
-Après une ingestion en masse, l'index Lucene contient potentiellement des centaines de segments — chaque flush pendant l'ingestion en crée de nouveaux. Trop de segments = recherches plus lentes.
+After a bulk ingestion, the underlying Lucene index can contain hundreds of segments — each flush during ingestion creates new ones. Too many segments = slower searches.
 
 ```python
 client.indices.forcemerge(index=index, max_num_segments=1, request_timeout=300)
 ```
 
-`max_num_segments=1` fusionne tous les segments en un seul par shard. C'est l'optimum pour un index en lecture seule : les recherches deviennent maximalement efficaces. **Attention** : c'est une opération coûteuse en I/O, à faire une seule fois après l'ingestion, jamais en continu.
+`max_num_segments=1` merges all segments into one per shard. This is the optimum for a read-heavy index: searches become maximally efficient. **Warning**: this is an I/O-intensive operation, to be done once after ingestion — never continuously.
 
 ---
 
-## 8. Résultats
+## 8. Results
 
 ```
-Bulk complete — 1 426 337 indexed, 0 errors in 84.9s
-Total: 1 426 337 documents
-Segments avant merge : 312 → après merge : 2
+Bulk complete — 1,426,337 indexed, 0 errors in 84.9s
+Total: 1,426,337 documents
+Segments before merge: 312 → after merge: 2
 ```
 
-**~16 800 documents/seconde**, zéro erreur. Une vérification rapide via les agrégations : prix moyen **$43.37**, note moyenne **4.0/5**, **8 520 best sellers**. Et la recherche full-text fonctionne — `"coffee makers"` remonte aussi "coffee maker" et "making coffee" grâce au stemming de l'analyseur `english`.
+**~16,800 documents/second**, zero errors. A quick verification via aggregations: average price **$43.37**, average rating **4.0/5**, **8,520 best sellers**. And full-text search works — `"coffee makers"` also returns "coffee maker" and "making coffee" thanks to the `english` analyzer's stemming.
 
 ---
 
-## Conclusion : les points clés
+## Conclusion: key takeaways
 
-1. **`dynamic: strict` d'abord** — Définir explicitement son mapping évite les surprises en production.
-2. **`keyword` vs `text`, c'est fondamental** — Se tromper ici, c'est des recherches qui ne fonctionnent pas ou de l'espace disque gaspillé.
-3. **Les deux optimisations qui changent tout** — `refresh_interval: -1` et `number_of_replicas: 0` pendant l'ingestion. Sans elles, le même pipeline tournerait 5 à 10 fois plus lentement.
-4. **`streaming_bulk` + générateur** — La combinaison qui permet d'ingérer des datasets de n'importe quelle taille avec une empreinte mémoire constante.
-5. **Le forcemerge, pas optionnel** — Si votre index est principalement en lecture, c'est la dernière étape de l'optimisation. Ne la sautez pas.
-6. **Testez avec `--limit`** — Valider le pipeline sur 1 000 documents avant de lancer sur 1,4 million économise du temps et de la frustration.
+1. **`dynamic: strict` first** — Defining your mapping explicitly avoids surprises in production.
+2. **`keyword` vs `text` is fundamental** — Getting this wrong means broken searches or wasted disk space.
+3. **The two optimizations that change everything** — `refresh_interval: -1` and `number_of_replicas: 0` during ingestion. Without them, the same pipeline would run 5 to 10 times slower.
+4. **`streaming_bulk` + generator** — The combination that lets you ingest datasets of any size with a constant memory footprint.
+5. **Force merge is not optional** — If your index is primarily read-heavy, force merge is the final optimization step. Don't skip it.
+6. **Test with `--limit`** — Validating the pipeline on 1,000 documents before running on 1.4 million saves time and frustration.
 
-*Le code complet est disponible sur GitHub. Le prochain article de la série couvrira les requêtes full-text avancées, les agrégations, et le scoring par pertinence — avec ce même dataset comme terrain de jeu.*
+*The full code is available on GitHub. The next article in the series will cover advanced full-text queries, aggregations, and relevance scoring — using this same dataset as a playground.*
