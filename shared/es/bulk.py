@@ -82,9 +82,7 @@ def restore_after_import(client: Elasticsearch, index: str) -> None:
     logger.info("Index '%s' settings restored (refresh=1s, replicas=1)", index)
 
 
-def forcemerge(
-    client: Elasticsearch, index: str, max_num_segments: int = 1
-) -> None:
+def forcemerge(client: Elasticsearch, index: str, max_num_segments: int = 1) -> None:
     """Force merge the index to reduce segment count (run after bulk import is complete)."""
     stats = client.indices.stats(index=index)
     before = stats["_all"]["primaries"]["segments"]["count"]

@@ -1,8 +1,11 @@
+PYTHON = .venv/bin/python
+BLACK = .venv/bin/black
+
 format:
-	black . --exclude '\.venv|__pycache__'
+	$(BLACK) . --exclude '\.venv|__pycache__'
 
 format-check:
-	black --check . --exclude '\.venv|__pycache__'
+	$(BLACK) --check . --exclude '\.venv|__pycache__'
 
 up:
 	docker compose -f docker/docker-compose.yml --env-file .env up -d

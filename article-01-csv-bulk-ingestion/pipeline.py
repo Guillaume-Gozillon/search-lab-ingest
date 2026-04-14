@@ -110,7 +110,9 @@ def run(csv_path: Path, dry_run: bool = False, limit: int | None = None) -> None
     ensure_index(client, new_index, str(MAPPING_PATH))
     optimize_for_import(client, new_index)
 
-    stream = tqdm(document_stream(csv_path, new_index, limit), desc="indexing", unit="docs")
+    stream = tqdm(
+        document_stream(csv_path, new_index, limit), desc="indexing", unit="docs"
+    )
     indexed, errors = bulk_index(client, stream, chunk_size=BULK_CHUNK_SIZE)
     logger.info("Indexed %d documents, %d errors", indexed, len(errors))
 
@@ -121,7 +123,9 @@ def run(csv_path: Path, dry_run: bool = False, limit: int | None = None) -> None
 
     forcemerge(client, new_index)
 
-    update_alias(client, alias=config.ES_ALIAS, new_index=new_index, old_index=old_index)
+    update_alias(
+        client, alias=config.ES_ALIAS, new_index=new_index, old_index=old_index
+    )
 
     if old_index:
         client.indices.delete(index=old_index)
