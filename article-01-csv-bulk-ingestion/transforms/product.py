@@ -1,12 +1,7 @@
 """Pure transform functions: CSV row dict → Elasticsearch document. No side effects."""
 
 import math
-import sys
 from datetime import datetime, timezone
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-from shared import config
 
 
 def _clean(value):
@@ -57,7 +52,6 @@ def transform(row: dict) -> dict | None:
     cat_id = _parse_int(row.get("category_id"))
 
     return {
-        "_index": config.INDEX_NAME,
         "_id": str(asin),
         "asin": str(asin),
         "title": _clean(row.get("title")),

@@ -100,6 +100,14 @@ def forcemerge(
     logger.info("Segments after merge: %d", after)
 
 
+def get_current_index(client: Elasticsearch, alias: str) -> str | None:
+    """Return the index currently behind an alias, or None if the alias doesn't exist."""
+    if not client.indices.exists_alias(name=alias):
+        return None
+    aliases = client.indices.get_alias(name=alias)
+    return next(iter(aliases))
+
+
 def update_alias(
     client: Elasticsearch,
     alias: str,
