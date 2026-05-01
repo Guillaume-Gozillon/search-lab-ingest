@@ -1,0 +1,28 @@
+{
+  "settings": {
+    "number_of_shards": 2,
+    "number_of_replicas": 0
+  },
+  "mappings": {
+    "dynamic": "strict",
+    "properties": {
+      "asin":        { "type": "keyword" },
+      "title":       { "type": "text", "analyzer": "english" },
+      "imgUrl":      { "type": "keyword", "index": false },
+      "productURL":  { "type": "keyword", "index": false },
+      "stars":       { "type": "float" },
+      "reviews":     { "type": "integer" },
+      "price":       { "type": "float" },
+      "listPrice":   { "type": "float" },
+      "category_id": { "type": "keyword" },
+      "isBestSeller":{ "type": "boolean" },
+      "ingested_at": { "type": "date" },
+      "embedding":   {
+        "type": "dense_vector",
+        "dims": 768,
+        "index": true,
+        "similarity": "cosine"
+      }
+    }
+  }
+}
