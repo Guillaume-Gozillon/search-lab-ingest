@@ -68,8 +68,8 @@ venv: .venv/.installed
 up: start
 down: stop
 
-format:
+format: venv
 	$(BLACK) . --exclude '\.venv|__pycache__'
 
-format-check:
+format-check: venv
 	$(BLACK) --check . --exclude '\.venv|__pycache__'
