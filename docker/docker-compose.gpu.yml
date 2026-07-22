@@ -1,0 +1,12 @@
+# GPU override — Linux + nvidia-container-toolkit only.
+# Used automatically by `make start GPU=1`.
+
+services:
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
