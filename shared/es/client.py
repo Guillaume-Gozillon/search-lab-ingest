@@ -28,3 +28,41 @@ def ensure_index(client: Elasticsearch, index: str, mapping_path: str) -> None:
 
     client.indices.create(index=index, body=body)
     logger.info("Created index '%s'", index)
+
+
+def next_version_index(client: Elasticsearch, base: str) -> str:
+    """Return the next free versioned index name, e.g. 'base_v3' after 'base_v2'.
+
+    Only `base_v<digits>` names count; an unversioned legacy `base` index is ignored,
+    so the first versioned build alongside it is `base_v1`.
+    """
+    existing = client.indices.get(
+        index=f"{base}_v*", ignore_unavailable=True, allow_no_indices=True
+    )
+    versions = [
+        int(suffix)
+        for name in existing
+        if (suffix := name.rsplit("_v", 1)[-1]).isdigit()
+    ]
+    return f"{base}_v{max(versions, default=0) + 1}"
+
+
+def resolve_write_index(client: Elasticsearch, base: str, alias: str) -> str:
+    """Return the index to write into for an incremental run.
+
+    Follows the alias when it exists, falls back to the legacy unversioned index,
+    and otherwise names a first versioned index.
+    """
+    if client.indices.exists_alias(name=alias):
+        indices = sorted(client.indices.get_alias(name=alias))
+        if len(indices) > 1:
+            raise RuntimeError(
+                f"Alias '{alias}' points at {len(indices)} indices ({', '.join(indices)}) "
+                "— refusing to guess which one to write to. Resolve it by hand."
+            )
+        return indices[0]
+
+    if client.indices.exists(index=base):
+        return base
+
+    return f"{base}_v1"

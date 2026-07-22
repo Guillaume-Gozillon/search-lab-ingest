@@ -26,14 +26,20 @@ from shared.es.bulk import (
     forcemerge,
     optimize_for_import,
     restore_after_import,
+    update_alias,
 )
-from shared.es.client import build_es_client, ensure_index
+from shared.es.client import (
+    build_es_client,
+    ensure_index,
+    next_version_index,
+    resolve_write_index,
+)
 from embeddings.ollama import embed_stream
 from transforms.product import transform
 
 logger = logging.getLogger(__name__)
 
-INDEX_NAME = "amazon_products_embeddings"
+INDEX_BASE = "amazon_products_embeddings"
 MAPPING_PATH = (
     Path(__file__).resolve().parent / "mappings" / "amazon_products_embeddings_v1.json"
 )
@@ -69,7 +75,7 @@ def download_from_kaggle(dest: Path) -> Path:
     return dest
 
 
-def document_stream(csv_path: Path, limit: int | None) -> Iterator[dict]:
+def document_stream(csv_path: Path, limit: int | None, index: str) -> Iterator[dict]:
     """Yield transformed ES documents from the CSV, reading 10 000 rows at a time."""
     emitted = 0
     skipped = 0
@@ -88,7 +94,7 @@ def document_stream(csv_path: Path, limit: int | None) -> Iterator[dict]:
             if doc is None:
                 skipped += 1
                 continue
-            doc["_index"] = INDEX_NAME
+            doc["_index"] = index
             emitted += 1
             yield doc
 
@@ -100,6 +106,7 @@ def run(
     dry_run: bool = False,
     limit: int | None = None,
     embed_batch: int = EMBED_BATCH_SIZE,
+    recreate: bool = False,
 ) -> None:
     """Execute the ingestion pipeline."""
     if not csv_path.exists():
@@ -111,7 +118,7 @@ def run(
 
     if dry_run:
         stream = tqdm(
-            document_stream(csv_path, limit),
+            document_stream(csv_path, limit, INDEX_BASE),
             desc="dry-run-transform",
             unit="docs",
         )
@@ -134,10 +141,26 @@ def run(
         return
 
     es_client = build_es_client()
-    ensure_index(es_client, INDEX_NAME, str(MAPPING_PATH))
-    optimize_for_import(es_client, INDEX_NAME)
+    alias = config.ES_EMBEDDINGS_ALIAS
 
-    raw_stream = tqdm(document_stream(csv_path, limit), desc="transform", unit="docs")
+    if recreate:
+        index_name = next_version_index(es_client, INDEX_BASE)
+        logger.info(
+            "Recreate — building '%s'; the index currently behind '%s' stays queryable "
+            "until the alias swap at the end",
+            index_name,
+            alias,
+        )
+    else:
+        index_name = resolve_write_index(es_client, INDEX_BASE, alias)
+        logger.info("Incremental — writing into '%s'", index_name)
+
+    ensure_index(es_client, index_name, str(MAPPING_PATH))
+    optimize_for_import(es_client, index_name)
+
+    raw_stream = tqdm(
+        document_stream(csv_path, limit, index_name), desc="transform", unit="docs"
+    )
     embedded_stream = embed_stream(
         raw_stream,
         ollama_client,
@@ -147,12 +170,24 @@ def run(
     indexed, errors = bulk_index(es_client, embedded_stream, chunk_size=BULK_CHUNK_SIZE)
     logger.info("Indexed %d documents, %d errors", indexed, len(errors))
 
-    restore_after_import(es_client, INDEX_NAME)
+    restore_after_import(es_client, index_name)
 
-    total = es_client.count(index=INDEX_NAME)["count"]
-    logger.info("Total documents in '%s': %d", INDEX_NAME, total)
+    total = es_client.count(index=index_name)["count"]
+    logger.info("Total documents in '%s': %d", index_name, total)
 
-    forcemerge(es_client, INDEX_NAME)
+    forcemerge(es_client, index_name)
+
+    # En dernier : l'alias ne bascule que sur un index complet et rafraîchi.
+    detached = update_alias(es_client, alias, index_name)
+    if detached:
+        logger.info(
+            "Previous index kept — roll back with: "
+            "POST /_aliases {'actions':[{'add':{'index':'%s','alias':'%s'}}]}, "
+            "or drop it with: DELETE /%s",
+            detached[0],
+            alias,
+            detached[0],
+        )
 
 
 if __name__ == "__main__":
@@ -185,6 +220,14 @@ if __name__ == "__main__":
         default=EMBED_BATCH_SIZE,
         help=f"Ollama embedding batch size (default: {EMBED_BATCH_SIZE})",
     )
+    parser.add_argument(
+        "--recreate",
+        action="store_true",
+        help=(
+            "Build a fresh versioned index instead of writing into the current one, "
+            "then swap the alias onto it once the run completes"
+        ),
+    )
     args = parser.parse_args()
 
     run(
@@ -192,4 +235,5 @@ if __name__ == "__main__":
         dry_run=args.dry_run,
         limit=args.limit,
         embed_batch=args.embed_batch,
+        recreate=args.recreate,
     )

@@ -70,7 +70,35 @@ python article-02-vector-ingestion/pipeline.py
 
 # Tune embedding batch size (default: 128)
 python article-02-vector-ingestion/pipeline.py --limit 100000 --embed-batch 256
+
+# Rebuild from scratch into a fresh versioned index, then swap the alias
+python article-02-vector-ingestion/pipeline.py --limit 100000 --recreate
 ```
+
+Or through the Makefile, from the repo root:
+
+```bash
+make dry-run
+make ingest LIMIT=100000 EMBED_BATCH=256
+make ingest LIMIT=100000 RECREATE=1
+```
+
+## Index versioning
+
+Documents are keyed by ASIN (`_id`), so a normal run **overwrites in place** rather than
+appending — re-running never duplicates, it refreshes.
+
+`--recreate` builds a new `amazon_products_embeddings_v<n>` instead, leaving the index
+currently in service untouched and queryable for the whole run. Only once the new index is
+complete, refreshed and merged does the alias move onto it, in a single atomic call:
+
+```bash
+curl -s 'localhost:9200/_cat/aliases/products_embeddings?v'   # which index is live
+curl -s 'localhost:9200/products_embeddings/_count'           # always query the alias
+```
+
+The previous index is kept on disk — the run logs the exact call to roll back onto it, or to
+delete it once you're satisfied. Query `products_embeddings`, never a versioned name.
 
 ## Structure
 
@@ -96,6 +124,7 @@ article-02-vector-ingestion/
 6. Bulk-indexes with `chunk_size=2000` via `streaming_bulk`
 7. Restores settings (`refresh_interval: 1s`, `replicas: 1`) and refreshes
 8. Force merges to 1 segment per shard
+9. Points the `products_embeddings` alias at the index it just wrote
 
 ## Embedding choices
 

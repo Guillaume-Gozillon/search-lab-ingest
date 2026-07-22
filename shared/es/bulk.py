@@ -82,6 +82,35 @@ def restore_after_import(client: Elasticsearch, index: str) -> None:
     logger.info("Index '%s' settings restored (refresh=1s, replicas=1)", index)
 
 
+def update_alias(client: Elasticsearch, alias: str, index: str) -> list[str]:
+    """Point `alias` at `index`, detaching it from any other index in one atomic call.
+
+    Returns the indices the alias was detached from — they keep their data and stay
+    queryable by name, so a rollback is just another call to this function.
+    """
+    detached = []
+    actions: list[dict] = []
+
+    if client.indices.exists_alias(name=alias):
+        detached = [i for i in client.indices.get_alias(name=alias) if i != index]
+        actions += [{"remove": {"index": i, "alias": alias}} for i in detached]
+
+    actions.append({"add": {"index": index, "alias": alias}})
+    client.indices.update_aliases(actions=actions)
+
+    if detached:
+        logger.info(
+            "Alias '%s' → '%s' (detached from %s, kept on disk)",
+            alias,
+            index,
+            ", ".join(detached),
+        )
+    else:
+        logger.info("Alias '%s' → '%s'", alias, index)
+
+    return detached
+
+
 def forcemerge(client: Elasticsearch, index: str, max_num_segments: int = 1) -> None:
     """Force merge the index to reduce segment count (run after bulk import is complete)."""
     stats = client.indices.stats(index=index)
