@@ -13,6 +13,7 @@ COMPOSE = docker compose $(COMPOSE_FILES) --env-file .env
 ## Tout démarrer : .env + venv + dépendances + Docker (ES, Kibana, Ollama + modèle)
 start: env venv
 	$(COMPOSE) up -d --wait
+	$(COMPOSE) --profile init up --force-recreate ollama-init
 	@echo ""
 	@echo "  Elasticsearch  http://localhost:9200"
 	@echo "  Kibana         http://localhost:5601"

@@ -49,6 +49,9 @@ services:
   ollama-init:
     image: ollama/ollama:latest
     container_name: search-lab-ollama-init
+    # Job one-shot : exclu du `up --wait` (Compose traite tout conteneur
+    # sorti comme un échec, même en exit 0). Lancé explicitement par le Makefile.
+    profiles: ["init"]
     depends_on:
       ollama:
         condition: service_healthy
