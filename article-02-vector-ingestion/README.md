@@ -78,10 +78,14 @@ python article-02-vector-ingestion/pipeline.py --limit 100000 --recreate
 Or through the Makefile, from the repo root:
 
 ```bash
-make dry-run
-make ingest LIMIT=100000 EMBED_BATCH=256
-make ingest LIMIT=100000 RECREATE=1
+make dry-run                     # 1000 docs, transform + embed, no indexing
+make ingest                      # full 1.4M dataset into a fresh versioned index
+make ingest LIMIT=100000         # subset
+make ingest EMBED_BATCH=256      # larger Ollama batches
+make ingest INCREMENTAL=1        # rewrite the live index instead of building a new one
 ```
+
+`make ingest` defaults to `--recreate` and to the **full** dataset — `LIMIT` is the opt-in.
 
 ## Index versioning
 

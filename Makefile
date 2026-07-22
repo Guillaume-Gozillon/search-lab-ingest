@@ -46,10 +46,11 @@ clean:
 dry-run: env venv
 	$(PYTHON) $(PIPELINE) --dry-run --limit 1000
 
-## Ingestion complète (1.4M docs). Surcharger : make ingest LIMIT=100000 EMBED_BATCH=256
-## RECREATE=1 construit un index versionné neuf, puis bascule l'alias à la fin.
+## Ingestion complète (1.4M docs) dans un index versionné neuf, alias basculé à la fin.
+## Options : LIMIT=100000 pour un sous-ensemble, EMBED_BATCH=256 pour des lots plus gros,
+## INCREMENTAL=1 pour réécrire dans l'index en service au lieu d'en construire un neuf.
 ingest: env venv
-	$(PYTHON) $(PIPELINE) $(if $(LIMIT),--limit $(LIMIT)) $(if $(EMBED_BATCH),--embed-batch $(EMBED_BATCH)) $(if $(RECREATE),--recreate)
+	$(PYTHON) $(PIPELINE) $(if $(INCREMENTAL),,--recreate) $(if $(LIMIT),--limit $(LIMIT)) $(if $(EMBED_BATCH),--embed-batch $(EMBED_BATCH))
 
 env:
 	@test -f .env || (cp .env.example .env && echo "→ .env créé depuis .env.example")
