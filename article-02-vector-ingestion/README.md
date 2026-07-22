@@ -108,6 +108,44 @@ curl -s 'localhost:9200/_cat/indices/amazon_products_embeddings*?v&s=index&h=ind
 The previous index is kept on disk — the run logs the exact call to roll back onto it, or to
 delete it once you're satisfied. Query `products_embeddings`, never a versioned name.
 
+## Verifying an index
+
+A run that died midway leaves an index that *looks* populated, and `docs.count` alone will
+not tell you. Three checks, cheapest first.
+
+**Coverage** — every document must carry a vector, so the two counts have to match:
+
+```bash
+IDX=localhost:9200/amazon_products_embeddings
+
+curl -s "$IDX/_count"
+curl -s "$IDX/_count" -H 'Content-Type: application/json' \
+  -d '{"query":{"exists":{"field":"embedding"}}}'
+```
+
+The expected total is the number of CSV rows *minus* the rows `transform` drops for having
+no ASIN or no title. Beware that pandas reads `NULL`, `NA`, `None` and friends as `NaN`, so a
+product whose title is literally the string `NULL` is dropped — the full dataset yields
+1 426 336 documents out of 1 426 337 rows for exactly that reason.
+
+A high `docs.deleted` is **not** a defect: `_id` is the ASIN, so re-running overwrites in
+place and leaves tombstones behind. The force merge at the end of a run reclaims them.
+
+**Authenticity** — presence is not correctness. Re-embed a stored title and compare it to
+the stored vector; cosine comes back at 1.0 to within float noise:
+
+```python
+stored = doc["_source"]["embedding"]
+recomputed = client.embed(model="nomic-embed-text", input=[doc["_source"]["title"]])["embeddings"][0]
+cosine(stored, recomputed)   # → 0.99999…   anything lower: not this model's vectors
+```
+
+This is what distinguishes a real embedding from a well-formed 768-float array, and it is
+worth running on a few documents from each ingestion batch before trusting an index.
+
+**End to end** — a kNN query in natural language is the smoke test. `"wireless bluetooth
+headphones for running"` should return running earbuds at the top, not arbitrary products.
+
 ## Structure
 
 ```
@@ -143,9 +181,34 @@ article-02-vector-ingestion/
 
 ## Performance notes
 
-The embedding stage is the bottleneck — one Ollama call per document on 1.4M items would be hours. Two mitigations:
+The embedding stage is the bottleneck — one Ollama call per document over 1.4M items would run for hours. Two levers matter, and they are not worth the same.
 
-- **Batching.** Ollama's `/api/embed` accepts an `input` array; we send 128 titles per call by default. Tune with `--embed-batch`.
-- **Subset.** For the article we ingest 100k docs (`--limit 100000`); enough to demonstrate hybrid search downstream without an overnight run.
+### Where Ollama runs, and how big the batches are
 
-GPU is strongly recommended — `ollama` in `docker/docker-compose.yml` is configured to pass through NVIDIA devices via the Container Toolkit.
+Measured on an RTX 5060 Ti (16 GB) with `--dry-run`, so the numbers isolate transform + embed with no bulk indexing in the way:
+
+| Setup | Throughput | Extrapolated to 1.4M |
+|-------|-----------|----------------------|
+| CPU only | 87 docs/s | ~4 h 30 |
+| GPU, `--embed-batch 128` (default) | 321 docs/s | ~74 min |
+| **GPU, `--embed-batch 512`** | **504 docs/s** | **~47 min** |
+| GPU, `--embed-batch 1024` | 507 docs/s | plateau |
+| GPU, `--embed-batch 2048` | 505 docs/s | plateau |
+
+Moving Ollama onto the GPU buys ~3.7×; raising the batch on top of that buys another ~1.6×. Both are cheap — neither touches the pipeline code:
+
+```bash
+make ingest EMBED_BATCH=512
+```
+
+Getting the GPU is the part that fails quietly: a CPU-only run produces exactly the same index, just hours later. See [GPU acceleration](../README.md#gpu-acceleration) for how the stack enables it and, more importantly, how to verify it actually happened.
+
+### Why it stops at ~500 docs/s
+
+Throughput plateaus from batch 512 onward while the GPU sits at **51 % average utilization** (59 % peak). The model is small — 261 MiB of weights — so there is nothing left to saturate by enlarging batches further.
+
+The idle half is structural, not a tuning problem: the pipeline is a single thread doing read → transform → HTTP → bulk in sequence, so the GPU waits while pandas parses CSV and while Elasticsearch takes the bulk. Closing that gap needs the stages to overlap, not bigger batches — see [Known limits](ARCHITECTURE.md#6-known-limits).
+
+### Subset
+
+For the article, 100k docs (`make ingest LIMIT=100000`) is enough to demonstrate hybrid search downstream without committing to a full run.

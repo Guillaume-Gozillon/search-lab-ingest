@@ -66,20 +66,29 @@ flowchart TD
     CFG -->|"OLLAMA_EMBED_MODEL<br/>nomic-embed-text"| C2["embed_stream(model=...)"]
     CFG -->|"OLLAMA_EMBED_DIMS<br/>768"| C3["not read by the mapping"]
 
-    subgraph DOCKER["docker/docker-compose.yml"]
-        OL["ollama service<br/>NVIDIA passthrough + healthcheck"]
+    subgraph DOCKER["docker/"]
+        OL["docker-compose.yml<br/>ollama service + healthcheck<br/>no GPU configuration"]
+        GPUF["docker-compose.gpu.yml<br/>NVIDIA device passthrough"]
         INIT["ollama-init service<br/>ollama pull nomic-embed-text"]
+        GPUF -.->|"layered on by the Makefile<br/>when a usable GPU is detected"| OL
         OL -->|"condition: service_healthy"| INIT
     end
 
     MAP["mappings/amazon_products_embeddings_v1.json<br/>dims: 768 hardcoded"] --> C3
 
     style C3 fill:#e67e22,color:#fff
+    style GPUF fill:#e67e22,color:#fff
 ```
 
 The mapping's `dims: 768` and `OLLAMA_EMBED_DIMS` are two independent sources of truth:
 switching embedding model without updating the JSON fails indexing (`dynamic: strict`
 plus a dimension mismatch).
+
+The GPU passthrough is a **separate compose file**, not part of the base stack. Whether it
+gets layered on is decided at `make start` time, and nothing downstream reports the outcome:
+a CPU-only run indexes exactly the same documents, only far slower. That makes it a silent
+failure mode worth checking explicitly — see
+[GPU acceleration](../README.md#gpu-acceleration).
 
 ## 4. Lifecycle of a full run
 
@@ -136,8 +145,15 @@ flowchart TD
     L1["Sequential embedding<br/>one Ollama call at a time"] --> I1["main bottleneck<br/>→ worker pool or Ollama replicas"]
     L2["No retry, no checkpoint"] --> I2["an Ollama hiccup kills the whole run<br/>→ no resume, restart from scratch"]
     L3["dims duplicated across config and mapping"] --> I3["silent divergence when switching model"]
+    L4["GPU passthrough is opt-in at startup"] --> I4["a CPU-only run is ~6× slower<br/>and reports nothing"]
 
     style L1 fill:#e67e22,color:#fff
     style L2 fill:#e67e22,color:#fff
     style L3 fill:#e67e22,color:#fff
+    style L4 fill:#e67e22,color:#fff
 ```
+
+**On L1 —** measured, not theoretical: with the model on a GPU the pipeline plateaus around
+500 docs/s while the GPU idles at ~51 % utilization. Enlarging `--embed-batch` past 512 buys
+nothing, because the stall is the single thread serializing CSV parsing, the HTTP round-trip
+and the bulk call. The fix is overlapping the stages, not a bigger batch.
