@@ -6,8 +6,13 @@ PYTHON = .venv/bin/python
 PIP    = .venv/bin/pip
 BLACK  = .venv/bin/black
 
+# Le passthrough GPU n'est ajouté que si la machine sait le servir : pilote NVIDIA
+# présent ET runtime nvidia enregistré dans Docker. Sur le Mac les deux manquent, donc
+# l'override est ignoré. Forcer avec GPU=1, désactiver avec GPU=0.
+GPU ?= $(shell command -v nvidia-smi >/dev/null 2>&1 && docker info --format '{{json .Runtimes}}' 2>/dev/null | grep -q nvidia && echo 1 || echo 0)
+
 COMPOSE_FILES = -f docker/docker-compose.yml
-ifdef GPU
+ifeq ($(GPU),1)
 COMPOSE_FILES += -f docker/docker-compose.gpu.yml
 endif
 COMPOSE = docker compose $(COMPOSE_FILES) --env-file .env

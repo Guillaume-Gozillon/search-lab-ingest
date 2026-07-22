@@ -1,5 +1,6 @@
 # GPU override — Linux + nvidia-container-toolkit only.
-# Used automatically by `make start GPU=1`.
+# Ajouté automatiquement par le Makefile quand la machine expose un runtime nvidia ;
+# `make start GPU=1` le force, `GPU=0` l'écarte.
 
 services:
   ollama:
