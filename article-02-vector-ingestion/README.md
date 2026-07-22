@@ -6,6 +6,54 @@ Enriches the article-01 pipeline with vector embeddings: same Kaggle **Amazon Pr
 
 **Target index:** `amazon_products_embeddings`
 
+## Architecture
+
+A single chain of Python generators — the 1.4M-row CSV never sits in memory. Each stage pulls from the previous one on demand, with embeddings computed client-side (no ES inference pipeline).
+
+```mermaid
+flowchart LR
+    CSV[("amazon_products.csv<br/>~1.4M rows")]
+    subgraph PY["pipeline.py — Python process"]
+        direction LR
+        READ["pandas.read_csv<br/>chunksize=10,000"]
+        TRANSFORM["transform<br/>row dict → ES doc"]
+        EMBED["embed_stream<br/>batch=128"]
+        BULK["bulk_index<br/>chunk=2,000"]
+        READ --> TRANSFORM --> EMBED --> BULK
+    end
+    OLLAMA["Ollama<br/>nomic-embed-text<br/>:11434"]
+    ES[("Elasticsearch<br/>amazon_products_embeddings<br/>:9200")]
+
+    CSV --> READ
+    EMBED <-->|"POST /api/embed<br/>128 titles → 128 vectors, 768d"| OLLAMA
+    BULK -->|"_bulk"| ES
+```
+
+The embedding stage itself buffers, calls Ollama once per batch, and zips the returned vectors back onto the buffered documents:
+
+```mermaid
+flowchart TD
+    IN["incoming doc"] --> BUF["buffer.append(doc)"]
+    BUF --> FULL{"len(buffer) >= 128 ?"}
+    FULL -->|no| IN
+    FULL -->|yes| TEXTS["texts = [doc['title'] for doc in batch]"]
+    TEXTS --> CALL["client.embed(model, input=texts)<br/>1 HTTP call for 128 titles"]
+    CALL --> CHECK{"len(vectors) == len(batch) ?"}
+    CHECK -->|no| ERR["RuntimeError — refuse to zip<br/>misaligned vectors onto docs"]
+    CHECK -->|yes| ZIP["zip(batch, vectors)<br/>doc['embedding'] = vector"]
+    ZIP --> OUT["yield enriched doc"]
+    OUT --> IN
+    IN -.->|"stream exhausted"| FLUSH["flush remaining buffer"]
+    FLUSH --> TEXTS
+
+    style CALL fill:#4a7ebb,color:#fff
+    style ERR fill:#c0392b,color:#fff
+```
+
+Ollama's `/api/embed` returns vectors **in input order** — that guarantee is what makes the `zip` valid, and the cardinality check is the guardrail against silently attaching the wrong vector to the wrong product.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full picture: configuration wiring, run lifecycle, resulting document shape, and known limits.
+
 ## Run
 
 From the repo root, with the docker stack up (`make up`):
