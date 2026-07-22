@@ -2,7 +2,9 @@
 
 import json
 import logging
+import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from elasticsearch import Elasticsearch
@@ -11,6 +13,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from shared.config import ES_URL
 
 logger = logging.getLogger(__name__)
+
+# amazon_products_embeddings_v3_20260722-1730 — le timestamp est optionnel pour
+# rester compatible avec les index `_v<n>` créés avant son introduction.
+_VERSION_RE = re.compile(r"_v(\d+)(?:_\d{8}-\d{4})?$")
 
 
 def build_es_client() -> Elasticsearch:
@@ -31,20 +37,22 @@ def ensure_index(client: Elasticsearch, index: str, mapping_path: str) -> None:
 
 
 def next_version_index(client: Elasticsearch, base: str) -> str:
-    """Return the next free versioned index name, e.g. 'base_v3' after 'base_v2'.
+    """Return the next index name, e.g. 'base_v3_20260722-1730'.
 
-    Only `base_v<digits>` names count; an unversioned legacy `base` index is ignored,
-    so the first versioned build alongside it is `base_v1`.
+    The version counter orders the builds and the UTC timestamp says when each one
+    started, so `_cat/indices` sorted by name reads chronologically. An unversioned
+    legacy `base` index is ignored, so the first versioned build is `_v1`.
     """
     existing = client.indices.get(
         index=f"{base}_v*", ignore_unavailable=True, allow_no_indices=True
     )
     versions = [
-        int(suffix)
+        int(match.group(1))
         for name in existing
-        if (suffix := name.rsplit("_v", 1)[-1]).isdigit()
+        if (match := _VERSION_RE.search(name[len(base) :]))
     ]
-    return f"{base}_v{max(versions, default=0) + 1}"
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
+    return f"{base}_v{max(versions, default=0) + 1}_{stamp}"
 
 
 def resolve_write_index(client: Elasticsearch, base: str, alias: str) -> str:

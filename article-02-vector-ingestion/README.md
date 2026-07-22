@@ -92,13 +92,17 @@ make ingest INCREMENTAL=1        # rewrite the live index instead of building a 
 Documents are keyed by ASIN (`_id`), so a normal run **overwrites in place** rather than
 appending — re-running never duplicates, it refreshes.
 
-`--recreate` builds a new `amazon_products_embeddings_v<n>` instead, leaving the index
+`--recreate` builds a new `amazon_products_embeddings_v<n>_<YYYYMMDD-HHMM>` instead (UTC
+timestamp, so sorting index names by name sorts them chronologically), leaving the index
 currently in service untouched and queryable for the whole run. Only once the new index is
 complete, refreshed and merged does the alias move onto it, in a single atomic call:
 
 ```bash
 curl -s 'localhost:9200/_cat/aliases/products_embeddings?v'   # which index is live
 curl -s 'localhost:9200/products_embeddings/_count'           # always query the alias
+
+# every build, oldest first
+curl -s 'localhost:9200/_cat/indices/amazon_products_embeddings*?v&s=index&h=index,docs.count,store.size'
 ```
 
 The previous index is kept on disk — the run logs the exact call to roll back onto it, or to
