@@ -6,6 +6,7 @@ keep requests coming, which is what the concurrent stage in `embeddings/stream.p
 """
 
 import logging
+import time
 
 import httpx
 
@@ -17,14 +18,21 @@ logger = logging.getLogger(__name__)
 # de TEI est le premier démarrage (téléchargement du modèle), pas les requêtes.
 _DEFAULT_TIMEOUT = 120.0
 
+# 429 = file d'attente pleine côté serveur. Le dimensionnement se règle avec
+# --max-concurrent-requests dans docker-compose.yml ; ces essais ne sont là que pour
+# absorber un pic, pas pour compenser une file sous-dimensionnée (elle rejette
+# instantanément, et les essais s'épuiseraient tout aussi vite).
+_OVERLOAD_RETRIES = 5
+_OVERLOAD_BACKOFF = 0.5
+
 
 class TeiBackend:
     """Embeds through TEI's `/embed`.
 
-    `normalize` is sent explicitly rather than left to the server default: Ollama returns
-    L2-normalised vectors (measured norm 1.0000) and the index is built on cosine
-    similarity, so the two backends have to agree on this or the vectors stop being
-    comparable.
+    `normalize` is sent explicitly rather than left to the server default. The index is
+    built on cosine similarity and the recall gate compares raw dot products against it,
+    so unit vectors are an assumption the whole pipeline rests on — not something to
+    inherit from whatever the server happens to default to this release.
     """
 
     name = "tei"
@@ -40,12 +48,35 @@ class TeiBackend:
         self._client = httpx.Client(base_url=self.url, timeout=timeout)
 
     def embed(self, texts: list[str]) -> list[list[float]]:
-        """POST /embed — the response is the list of vectors, in input order."""
-        response = self._client.post(
-            "/embed",
-            json={"inputs": texts, "truncate": True, "normalize": self.normalize},
-        )
+        """POST /embed — the response is the list of vectors, in input order.
 
+        A 429 is retried with exponential backoff: TEI answers it the instant its queue
+        is full, so a burst of workers can collide on a queue that drains in seconds.
+        """
+        payload = {"inputs": texts, "truncate": True, "normalize": self.normalize}
+
+        for attempt in range(_OVERLOAD_RETRIES):
+            response = self._client.post("/embed", json=payload)
+            if response.status_code != 429 or attempt == _OVERLOAD_RETRIES - 1:
+                break
+            delay = _OVERLOAD_BACKOFF * 2**attempt
+            logger.warning(
+                "TEI overloaded (429), retrying a batch of %d in %.1fs (%d/%d)",
+                len(texts),
+                delay,
+                attempt + 1,
+                _OVERLOAD_RETRIES - 1,
+            )
+            time.sleep(delay)
+
+        if response.status_code == 429:
+            raise RuntimeError(
+                f"TEI still overloaded after {_OVERLOAD_RETRIES} attempts at {self.url}. "
+                f"Its --max-concurrent-requests counts one permit per input, and the "
+                f"pipeline keeps --workers × 2 batches of --embed-batch in flight: raise "
+                f"the flag on the text-embeddings service in docker-compose.yml to at "
+                f"least that product, or lower --workers/--embed-batch."
+            )
         if response.status_code == 413:
             raise RuntimeError(
                 f"TEI refused a batch of {len(texts)} inputs (413). Its "

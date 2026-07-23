@@ -12,9 +12,10 @@ services:
               count: all
               capabilities: [gpu]
 
-  # text-embeddings garde le profil `tei` déclaré dans le fichier de base : cet override
-  # ne le démarre pas, il lui donne le GPU quand `make start TEI=1` le démarre. L'image
-  # est une image CUDA — sans cette réservation elle n'a aucun intérêt.
+  # text-embeddings est le moteur du projet et démarre par défaut. L'image est une image
+  # CUDA : sans cette réservation elle n'a aucun intérêt — et c'est aussi pourquoi un
+  # conteneur qui atteint « Ready » a forcément le GPU, contrairement à Ollama qui
+  # retombe sur le CPU sans rien dire.
   text-embeddings:
     deploy:
       resources:

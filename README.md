@@ -18,22 +18,25 @@ git clone <repo-url> && cd search-lab-ingest
 make start
 ```
 
-`make start` creates `.env` from `.env.example`, builds the venv, installs dependencies,
-brings up the containers and pulls `nomic-embed-text` into the Ollama volume. There is no
-manual venv step — every target depends on it.
+`make start` creates `.env` from `.env.example`, builds the venv, installs dependencies and
+brings up the containers. There is no manual venv step — every target depends on it.
 
 | Command | Effect |
 |---------|--------|
-| `make start` | venv + dependencies + docker stack + model pull |
-| `make start TEI=1` | same, plus the `text-embeddings` service (see article-02) |
-| `make stop` | stop the containers, **keep** the volumes (ES data, Ollama models, HF cache) |
+| `make start` | venv + dependencies + Elasticsearch, Kibana, text-embeddings |
+| `make start OLLAMA=1` | same, plus the historical Ollama engine and its model pull |
+| `make stop` | stop the containers, **keep** the volumes (ES data, HF cache, Ollama models) |
 | `make clean` | stop and **delete** the volumes and the venv |
 | `make status` / `make logs` | `compose ps` / follow the logs |
 
 - Elasticsearch — `http://localhost:9200` (plain HTTP, security disabled: local lab, not a deployment)
 - Kibana — `http://localhost:5601`
-- Ollama — `http://localhost:11434`
-- text-embeddings — `http://localhost:8080`, only with `TEI=1`
+- text-embeddings — `http://localhost:8080`
+- Ollama — `http://localhost:11434`, only with `OLLAMA=1`
+
+The first `make start` downloads `nomic-embed-text-v1.5` from HuggingFace into the `hfcache`
+volume (~550 MB). `up --wait` only waits for the container to be running, not for the model
+to be resident, so follow `docker logs -f search-lab-tei` until *Ready* before ingesting.
 
 If the default `python3` is older than 3.10, pass a newer one: `make start PY=python3.12`.
 
@@ -44,8 +47,9 @@ heap gets the JVM OOM-killed mid-merge. Override the heap with `ES_HEAP` in `.en
 
 ## GPU acceleration
 
-Embedding is the bottleneck of article-02, and it is the one stage that cares whether Ollama
-can see a GPU — roughly **6× end to end** on a full run. The Makefile decides on its own:
+Embedding is the bottleneck of article-02, and it is the one stage that cares whether the
+model server can see a GPU — roughly **6× end to end** on a full run. The Makefile decides
+on its own:
 
 ```makefile
 GPU ?= $(shell command -v nvidia-smi ... && docker info ... | grep -q nvidia && echo 1 || echo 0)
@@ -54,7 +58,7 @@ GPU ?= $(shell command -v nvidia-smi ... && docker info ... | grep -q nvidia && 
 Both halves must hold: an NVIDIA driver **and** the `nvidia` runtime registered in Docker by
 the Container Toolkit. When they do, `docker/docker-compose.gpu.yml` is layered onto the base
 compose file and the `ollama` and `text-embeddings` containers receive the device
-passthrough. Otherwise the override is skipped and Ollama falls back to CPU.
+passthrough. Otherwise the override is skipped.
 
 | Command | Effect |
 |---------|--------|
@@ -68,29 +72,32 @@ passthrough lives entirely in the override. This matters because starting withou
 
 ### Verifying the GPU is really used
 
-Auto-detection only proves the host *can* serve a GPU. These three checks prove Ollama *is*
-using it — run them before committing to a long ingestion:
+Auto-detection only proves the host *can* serve a GPU. Run this before committing to a long
+ingestion:
 
 ```bash
-# 1. the container actually got the devices
-docker inspect search-lab-ollama --format '{{json .HostConfig.DeviceRequests}}'
-# → [{"Driver":"nvidia","Count":-1,...,"Capabilities":[["gpu"]]}]     null = CPU-only
+docker inspect search-lab-tei --format '{{json .HostConfig.DeviceRequests}}'
+# → [{"Driver":"nvidia","Count":-1,...,"Capabilities":[["gpu"]]}]     null = no passthrough
+```
 
-# 2. the model is resident on the GPU (send any embed call first to load it)
-docker exec search-lab-ollama ollama ps
-# → PROCESSOR = 100% GPU                                              100% CPU = override missed
+Note that `HostConfig.Runtime` stays `runc` even on GPU — the devices arrive through
+`DeviceRequests`, so that field is not the signal to read.
 
-# 3. every layer was offloaded
+For text-embeddings there is a second, blunter signal: the `120-*` image is a CUDA build, so
+a container that reaches *Ready* at all has the device. Silent CPU fallback is an Ollama
+failure mode, not a TEI one.
+
+If you brought Ollama back with `OLLAMA=1`, it needs its own checks, because it *will* fall
+back to CPU without saying so:
+
+```bash
+docker exec search-lab-ollama ollama ps          # PROCESSOR = 100% GPU   (100% CPU = missed)
 docker logs search-lab-ollama 2>&1 | grep offloaded | tail -1
 # → offloaded 13/13 layers to GPU                                     0/13 = CPU-only
 ```
 
-`nvidia-smi` should also list `/usr/bin/ollama` under its compute apps once the model is
-loaded. Note that `HostConfig.Runtime` stays `runc` even on GPU — the devices arrive through
-`DeviceRequests`, so that field is not the signal to read.
-
 Troubleshooting: `DeviceRequests: null` means the stack was started without the override —
-`make stop && make start GPU=1`. If it is populated but the offload is still `0/13`, the
+`make stop && make start GPU=1`. If it is populated and the container still will not run, the
 problem sits below Docker: check that `nvidia-container-toolkit` is installed and that
 `docker info --format '{{json .Runtimes}}'` mentions `nvidia`.
 
@@ -99,7 +106,7 @@ problem sits below Docker: check that `nvidia-container-toolkit` is installed an
 | Folder | Topic |
 |--------|-------|
 | [article-01-csv-bulk-ingestion](./article-01-csv-bulk-ingestion) | Bulk-index a 1.4M-row Kaggle CSV into ES with pandas |
-| [article-02-vector-ingestion](./article-02-vector-ingestion) | Add 768-dim `dense_vector` embeddings at ingestion time, via Ollama or TEI |
+| [article-02-vector-ingestion](./article-02-vector-ingestion) | Add 768-dim `dense_vector` embeddings at ingestion time, via text-embeddings-inference |
 
 ## Project structure
 
@@ -122,12 +129,12 @@ search-lab-ingest/
 │   ├── transforms/                      # raw row → ES document
 │   ├── embeddings/
 │   │   ├── stream.py                    # concurrent, order-preserving embed stage
-│   │   └── backends/                    # ollama | tei, chosen by EMBED_BACKEND
+│   │   └── backends/                    # tei (default) | ollama, chosen by EMBED_BACKEND
 │   └── pipeline.py                      # main entry point
 ├── tools/
 │   └── compare_embeddings.py            # do both backends produce the same vectors?
 ├── docker/
-│   ├── docker-compose.yml               # ES, Kibana, Ollama, TEI (profile) — no GPU config
+│   ├── docker-compose.yml               # ES, Kibana, TEI + Ollama (profile) — no GPU config
 │   └── docker-compose.gpu.yml           # NVIDIA passthrough, layered on when detected
 ├── Makefile                             # start/stop/ingest, GPU auto-detection
 ├── .env.example

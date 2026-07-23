@@ -26,8 +26,10 @@ OLLAMA_EMBED_DIMS: int = int(os.getenv("OLLAMA_EMBED_DIMS", "768"))
 # fixé par le `--model-id` du conteneur, un serveur TEI ne sert qu'un modèle.
 TEI_URL: str = os.getenv("TEI_URL", "http://localhost:8080")
 
-# Moteur d'embedding : `ollama` (défaut, comportement historique) ou `tei`.
-EMBED_BACKEND: str = os.getenv("EMBED_BACKEND", "ollama").strip().lower()
+# Moteur d'embedding : `tei` (défaut) ou `ollama`. Les deux servent nomic-embed-text-v1.5
+# et ne produisent PAS les mêmes vecteurs — cosinus moyen mesuré à 0,51 sur 1000 titres.
+# Un index construit avec l'un ne s'interroge pas avec l'autre : voir le README.
+EMBED_BACKEND: str = os.getenv("EMBED_BACKEND", "tei").strip().lower()
 
 # Requêtes d'embedding en vol. Le pipeline est un seul thread qui lit le CSV, embed, puis
 # bulk : sans concurrence, le GPU attend pendant le bulk et le bulk attend pendant le GPU.

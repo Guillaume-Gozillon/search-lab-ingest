@@ -39,9 +39,13 @@ services:
         condition: service_healthy
     mem_limit: 1g
 
+  # Moteur historique, gardé pour pouvoir relire les index construits avant la bascule et
+  # pour `make compare`. Sous profil : `make start OLLAMA=1`. Il ne sert plus à l'ingestion,
+  # voir EMBED_BACKEND.
   ollama:
     image: ollama/ollama:latest
     container_name: search-lab-ollama
+    profiles: ["ollama"]
     environment:
       # Ollama sérialise les requêtes quand ce réglage vaut 1. Le pipeline en pousse
       # EMBED_WORKERS en parallèle : sans ça elles font la queue et seul le recouvrement
@@ -61,9 +65,10 @@ services:
   ollama-init:
     image: ollama/ollama:latest
     container_name: search-lab-ollama-init
-    # Job one-shot : exclu du `up --wait` (Compose traite tout conteneur
-    # sorti comme un échec, même en exit 0). Lancé explicitement par le Makefile.
-    profiles: ["init"]
+    # Job one-shot : profil distinct de `ollama` pour rester hors du `up --wait` (Compose
+    # traite tout conteneur sorti comme un échec, même en exit 0). Lancé explicitement par
+    # le Makefile, qui active les deux profils à la fois.
+    profiles: ["ollama-init"]
     depends_on:
       ollama:
         condition: service_healthy
@@ -72,21 +77,18 @@ services:
     entrypoint: ["sh", "-c", "ollama pull nomic-embed-text"]
     restart: "no"
 
-  # Moteur d'embedding spécialisé — voir EMBED_BACKEND. Sous profil : `make start` ne le
-  # démarre pas, `make start TEI=1` oui. Inutile de lui faire occuper de la VRAM tant que
-  # le pipeline tourne sur Ollama.
+  # LE moteur d'embedding du projet — voir EMBED_BACKEND. Démarré par défaut.
   #
   # Le tag `120-*` cible Blackwell / compute capability 12.0 (RTX 50X0). `latest` est
   # compilé pour Ampere 8.0 et `89-*` pour Ada : ni l'un ni l'autre ne démarre sur sm_120.
   # HuggingFace marque cette variante « experimental ».
   #
   # Pas de healthcheck : le premier démarrage télécharge le modèle depuis HuggingFace, et
-  # l'image ne garantit pas la présence de curl. Suivre `docker logs -f search-lab-tei`
-  # jusqu'à « Ready » avant de lancer une ingestion.
+  # l'image ne garantit pas la présence de curl. `up --wait` n'attend donc que l'état
+  # « running » — suivre `docker logs -f search-lab-tei` jusqu'à « Ready » avant d'ingérer.
   text-embeddings:
     image: ghcr.io/huggingface/text-embeddings-inference:120-1.9.3
     container_name: search-lab-tei
-    profiles: ["tei"]
     command:
       - --model-id=nomic-ai/nomic-embed-text-v1.5
       # Révision épinglée. Le commit « v5 Transformers » du 2026-04-07 a ajouté
@@ -98,6 +100,11 @@ services:
       - --dtype=float16
       # Défaut 32 : rejetterait tout --embed-batch plus large avec un 413.
       - --max-client-batch-size=512
+      # Compte un permis par *input*, pas par requête : au défaut de 512, un seul lot de
+      # 512 titres remplit la file et tous les lots concurrents repartent en 429
+      # « Model is overloaded ». Il faut couvrir la fenêtre du client, soit
+      # --workers × 2 × --embed-batch (8 × 512 = 4096 aux valeurs par défaut).
+      - --max-concurrent-requests=8192
       - --max-batch-tokens=32768
       - --auto-truncate
     ports:

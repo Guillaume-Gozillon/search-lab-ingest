@@ -17,10 +17,14 @@ Reading the mean cosine similarity:
     ~ 0.68    the signature of a task prefix applied on one side only. Measured on this
               dataset: cos(title, "search_document: " + title) = 0.684. Check TEI's
               /info and EMBED_DOC_PREFIX before rebuilding anything.
-    < 0.95    otherwise: diverging model version (v1 vs v1.5). Investigate — do not
-              rebuild the index on the assumption that it is noise.
+    ~ 0.51    what ollama and tei actually give on this dataset, over 1000 titles, with
+              not one pair above 0.95. Different weights or a different pipeline; the
+              cause has not been established. It is why tei is the default: it reports
+              its model SHA, dtype and pooling, and Ollama's GGUF conversion does not.
+    < 0.95    otherwise: investigate — do not rebuild the index on the assumption that
+              it is noise.
 
-Both services have to be up: `make start TEI=1`.
+Both services have to be up: `make start OLLAMA=1`.
 """
 
 import argparse

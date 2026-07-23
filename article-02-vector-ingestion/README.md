@@ -1,6 +1,6 @@
 # Article 02 — Vector Ingestion
 
-Enriches the article-01 pipeline with vector embeddings: same Kaggle **Amazon Products Dataset 2023**, same Elasticsearch instance, but each document gets a 768-dim `dense_vector` generated at ingestion time by `nomic-embed-text` — served either by [Ollama](https://ollama.com) or by [text-embeddings-inference](https://github.com/huggingface/text-embeddings-inference), see [Choosing a backend](#choosing-an-embedding-backend).
+Enriches the article-01 pipeline with vector embeddings: same Kaggle **Amazon Products Dataset 2023**, same Elasticsearch instance, but each document gets a 768-dim `dense_vector` generated at ingestion time by `nomic-embed-text-v1.5`, served by [text-embeddings-inference](https://github.com/huggingface/text-embeddings-inference). [Ollama](https://ollama.com) is still wired in as an opt-in — see [The embedding backend](#the-embedding-backend) for why it is no longer the default.
 
 **Dataset:** [Amazon Products Dataset 2023 (1.4M products)](https://www.kaggle.com/datasets/asaniczka/amazon-products-dataset-2023-1-4m-products) — download `amazon_products.csv` and place it in `article-02-vector-ingestion/data/`.
 
@@ -21,7 +21,7 @@ flowchart LR
         BULK["bulk_index<br/>chunk=2,000"]
         READ --> TRANSFORM --> EMBED --> BULK
     end
-    BACKEND["EMBED_BACKEND<br/>ollama :11434<br/>or tei :8080"]
+    BACKEND["EMBED_BACKEND<br/>tei :8080 (default)<br/>or ollama :11434"]
     ES[("Elasticsearch<br/>amazon_products_embeddings<br/>:9200")]
 
     CSV --> READ
@@ -66,7 +66,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full picture: configuration wirin
 From the repo root, with the docker stack up (`make up`):
 
 ```bash
-# Dry run (transform + embed, no indexing) — validates Ollama connectivity
+# Dry run (transform + embed, no indexing) — validates backend connectivity
 python article-02-vector-ingestion/pipeline.py --dry-run --limit 1000
 
 # Limited ingestion (recommended for the article — 100k docs)
@@ -90,7 +90,7 @@ make ingest                      # full 1.4M dataset into a fresh versioned inde
 make ingest LIMIT=100000         # subset
 make ingest EMBED_BATCH=512      # larger embedding batches
 make ingest WORKERS=8            # more requests in flight
-make ingest BACKEND=tei          # switch engine (needs make start TEI=1)
+make ingest BACKEND=ollama       # historical engine (needs make start OLLAMA=1)
 make ingest INCREMENTAL=1        # rewrite the live index instead of building a new one
 ```
 
@@ -207,25 +207,45 @@ There is deliberately no force merge — see [Recall](#recall--is-the-index-actu
 - **Index type:** `int8_hnsw` with `m: 32`, `ef_construction: 200`. ES 9 would default to `m: 16, ef_construction: 100`, which measurably under-serves 1.4M vectors — the explicit values are worth their indexing cost, see below.
 - **Task prefixes:** none. The model expects them; the index is built without. See [Task prefixes](#task-prefixes-the-trap-that-does-not-raise).
 
-## Choosing an embedding backend
+## The embedding backend
 
-`EMBED_BACKEND` picks the engine. Both serve `nomic-embed-text`; they are not the same kind of program.
+`EMBED_BACKEND` picks the engine. **TEI is the default and the one this index is built with.** Ollama is kept as an opt-in, and the section below explains why it stopped being the answer.
 
-| | `ollama` (default) | `tei` |
+| | `tei` (default) | `ollama` (opt-in) |
 |---|---|---|
-| What it is | general generation engine | purpose-built embedding server |
-| Batching | one request at a time per slot | dynamic, server-side |
-| Concurrency ceiling | `OLLAMA_NUM_PARALLEL` | none declared |
-| Padding | 28-token titles into a large context | tokenizer-length batches |
-| Start-up | `ollama pull`, cached in a volume | downloads from HuggingFace on first run |
+| What it is | purpose-built embedding server | general generation engine |
+| Batching | dynamic, server-side | one request at a time per slot |
+| Concurrency ceiling | `--max-concurrent-requests` | `OLLAMA_NUM_PARALLEL` |
+| Padding | tokenizer-length batches | 28-token titles into a large context |
+| Pipeline | reported by `/info`: mean pooling, dtype, revision | GGUF conversion, not introspectable |
+| Started by | `make start` | `make start OLLAMA=1` |
 
 ```bash
-make start TEI=1                 # brings up text-embeddings alongside the rest
+make start                       # ES + Kibana + text-embeddings
 docker logs -f search-lab-tei    # wait for "Ready" — first start downloads the model
-make ingest BACKEND=tei
+make ingest EMBED_BATCH=512
 ```
 
-The image tag matters: `120-1.9.3` is the Blackwell / compute-capability-12.0 build for an RTX 50X0. `latest` targets Ampere 8.0 and `89-*` targets Ada — neither starts on sm_120. HuggingFace marks the 12.0 variant experimental.
+### They do not produce the same vectors
+
+Measured with `make compare`, 1 000 titles spread across the catalogue, both engines serving what is nominally `nomic-embed-text-v1.5`:
+
+```
+  mean    0.5095        min  0.3469        p50  0.5002        max  0.9402
+  > 0.999      0        0.99–0.999   0     0.95–0.99   0      <= 0.95   1000
+```
+
+Not one pair above 0.95. This is **not** the signature of a task prefix — that one sits at 0.684 and is why the reading grid below names it explicitly. Two engines that claim the same model are producing measurably different embeddings, and the cause has not been established.
+
+TEI is the one kept, for a reason that is about verifiability rather than a benchmark: it implements the sentence-transformers reference pipeline (transformer → mean pooling → L2 normalize) and its `/info` reports exactly which model SHA, dtype and pooling it is running. Ollama's GGUF conversion reports none of that, and `ollama show` cannot even distinguish nomic v1 from v1.5 — both are 137M parameters. When two things disagree, keep the one that can tell you what it did.
+
+**What this means in practice.** Nothing errors. TEI produces perfectly valid 768-float unit vectors, Elasticsearch indexes them, the HNSW graph builds, kNN answers, and the recall gate passes. An embedding only means something relative to other vectors from the same model — so an index built with one engine and *queried* with the other returns ten plausible-looking products that have nothing to do with the query. No exception, no warning, no counter out of place. Same failure mode as the task prefixes below.
+
+The recall gate does not protect you here either: it probes with vectors drawn from the index itself, so it is measuring inside a single space by construction. It proves the graph retrieves what it was given, not that what it was given means what you think.
+
+### The image tag and the pinned revision
+
+`120-1.9.3` is the Blackwell / compute-capability-12.0 build for an RTX 50X0. `latest` targets Ampere 8.0 and `89-*` targets Ada — neither starts on sm_120. HuggingFace marks the 12.0 variant experimental.
 
 **The model revision is pinned, and has to be.** `main` of `nomic-ai/nomic-embed-text-v1.5` does not start under TEI:
 
@@ -234,24 +254,24 @@ Error: Failed to parse `config.json`
 Caused by: duplicate field `max_position_embeddings` at line 42 column 15
 ```
 
-The upstream commit *v5 Transformers* (2026-04-07) added `max_position_embeddings` to a `config.json` that already declared `n_positions`. TEI aliases the two onto the same field, so serde sees a duplicate and the parse fails before a single weight is loaded. The compose file pins `e5cf08aa` — the last commit before that change. Same weights, `1_Pooling/config.json` still says `pooling_mode_mean_tokens: true`, so the vectors stay comparable to Ollama's. Drop the pin once upstream fixes the config, not before.
+The upstream commit *v5 Transformers* (2026-04-07) added `max_position_embeddings` to a `config.json` that already declared `n_positions`. TEI aliases the two onto the same field, so serde sees a duplicate and the parse fails before a single weight is loaded. The compose file pins `e5cf08aa`, the last commit before that change — same weights, `1_Pooling/config.json` still says `pooling_mode_mean_tokens: true`. Drop the pin once upstream fixes the config, not before, and confirm with `curl -s localhost:8080/info` that `model_sha` is what you asked for.
 
-One consequence: Ollama serves whatever revision it ships, TEI now serves a July 2025 one. They should still match — that is what `make compare` is for, and it matters more now than it did, not less.
-
-**Verify before you switch an index you care about:**
+### Comparing the two, if you ever need to
 
 ```bash
-make compare                     # both services must be up
+make start OLLAMA=1              # brings the historical engine back up
+make compare LIMIT=1000
 ```
 
-`tools/compare_embeddings.py` embeds the same 1 000 titles through both and reports the cosine distribution. It exists because two failure modes are invisible otherwise: `ollama show` reports 137M parameters for both nomic v1 and v1.5, so it cannot tell you which one you are running; and TEI reads `config_sentence_transformers.json` from the model repo and may apply a default prompt nobody asked for. Reading the mean:
+`tools/compare_embeddings.py` embeds the same titles through both and reports the cosine distribution. Reading the mean:
 
 | mean cosine | reading |
 |---|---|
-| > 0.999 | same model, same convention — the swap is safe |
+| > 0.999 | same model, same convention — interchangeable |
 | ~ 0.99 | kernel and dtype differences, benign |
 | ~ 0.68 | a task prefix applied on **one side only** — measured signature on this dataset |
-| < 0.95 otherwise | diverging model version. Investigate; do not rebuild on the assumption it is noise |
+| ~ 0.51 | what these two actually give. Different weights or a different pipeline; cause not established |
+| < 0.95 otherwise | investigate. Do not rebuild an index on the assumption it is noise |
 
 ## Task prefixes: the trap that does not raise
 
@@ -321,7 +341,7 @@ The embedding stage is the bottleneck — one call per document over 1.4M items 
 
 ### Where the model runs, and how big the batches are
 
-Measured on an RTX 5060 Ti (16 GB) with `--dry-run` **on the single-threaded pipeline**, so the numbers isolate transform + embed with no bulk indexing in the way. They are the baseline the concurrency work below is measured against:
+Measured on an RTX 5060 Ti (16 GB) with `--dry-run`, **on the single-threaded pipeline and on Ollama** — that is, the configuration this article started from. The numbers isolate transform + embed with no bulk indexing in the way, and they are the baseline everything below is measured against:
 
 | Setup | Throughput | Extrapolated to 1.4M |
 |-------|-----------|----------------------|
@@ -331,7 +351,7 @@ Measured on an RTX 5060 Ti (16 GB) with `--dry-run` **on the single-threaded pip
 | GPU, `--embed-batch 1024` | 507 docs/s | plateau |
 | GPU, `--embed-batch 2048` | 505 docs/s | plateau |
 
-Moving Ollama onto the GPU buys ~3.7×; raising the batch on top of that buys another ~1.6×. Both are cheap — neither touches the pipeline code:
+Moving the model onto the GPU buys ~3.7×; raising the batch on top of that buys another ~1.6×. Both are cheap — neither touches the pipeline code:
 
 ```bash
 make ingest EMBED_BATCH=512
@@ -355,11 +375,14 @@ The idle half was structural rather than a tuning problem. The pipeline was a si
 
 `embed_stream` now keeps `EMBED_WORKERS` requests in flight (default 4), so the seven minutes of bulk indexing come off the critical path and the CSV is parsed while the GPU works. Order and memory are preserved — see [Architecture](#architecture).
 
-That alone is bounded by what the server will accept. Ollama answers `OLLAMA_NUM_PARALLEL` requests at a time and queues the rest; the compose file now sets it to 4 to match, since one slot would make the client's concurrency pointless for everything except the bulk overlap. Four slots of a 137M-parameter model fit comfortably in 16 GB.
+That alone is bounded by what the server will accept, and the two engines refuse differently — which is worth knowing before you turn `WORKERS` up:
 
-Past that, the ceiling moves off the GPU: at 3 436 docs/s the bulk stage becomes the limit, which is ~7 min for the full dataset. That is the point of [switching to TEI](#choosing-an-embedding-backend) — Ollama's per-slot serialization and context padding are what stand between the two numbers.
+- **Ollama** answers `OLLAMA_NUM_PARALLEL` requests at a time and silently *queues* the rest. Nothing fails; the extra workers simply wait. The compose file sets it to 4 to match `EMBED_WORKERS`.
+- **TEI** answers `429 Model is overloaded` the instant its queue is full, and `--max-concurrent-requests` counts **one permit per input, not per request**. At the default 512, a single batch of 512 titles fills it and every concurrent batch bounces. It has to cover `--workers × 2 × --embed-batch` — 4 096 at the defaults, hence the 8 192 in the compose file. `TeiBackend` also retries a 429 with backoff, so a transient burst costs a few hundred milliseconds instead of a 47-minute run.
 
-**Not yet measured.** The throughput table above is the single-threaded baseline. Re-run `make dry-run` and a full `make ingest EMBED_BATCH=512` on the Linux box to put real figures against the concurrent pipeline and against TEI — nothing in this section beyond the baseline table has been benchmarked.
+Past that, the ceiling moves off the GPU entirely: at 3 436 docs/s the bulk stage becomes the limit, which is ~7 min for the full dataset.
+
+**Not yet measured.** The throughput table above is the single-threaded Ollama baseline. Re-run `make dry-run` and a full `make ingest EMBED_BATCH=512` to put real figures against the concurrent pipeline on TEI — nothing in this section beyond the baseline table has been benchmarked.
 
 ### Subset
 

@@ -16,12 +16,12 @@ ifeq ($(GPU),1)
 COMPOSE_FILES += -f docker/docker-compose.gpu.yml
 endif
 
-# text-embeddings est sous profil : il ne démarre qu'avec TEI=1. Le démarrer n'implique
-# rien côté pipeline — c'est EMBED_BACKEND (ou `make ingest BACKEND=tei`) qui décide qui
-# calcule les vecteurs.
-TEI ?= 0
-ifeq ($(TEI),1)
-COMPOSE_PROFILES = --profile tei
+# Ollama n'est plus le moteur du projet (voir EMBED_BACKEND, défaut `tei`) mais reste
+# démarrable pour relire un index construit avant la bascule et pour `make compare`.
+# Le profil `ollama-init` est distinct pour que le job de pull reste hors du `up --wait`.
+OLLAMA ?= 0
+ifeq ($(OLLAMA),1)
+COMPOSE_PROFILES = --profile ollama
 endif
 
 COMPOSE = docker compose $(COMPOSE_FILES) $(COMPOSE_PROFILES) --env-file .env
@@ -30,21 +30,23 @@ PIPELINE = article-02-vector-ingestion/pipeline.py
 
 .PHONY: start stop restart status logs clean up down venv env dry-run ingest compare format format-check
 
-## Tout démarrer : .env + venv + dépendances + Docker (ES, Kibana, Ollama + modèle).
-## TEI=1 ajoute le service text-embeddings.
+## Tout démarrer : .env + venv + dépendances + Docker (ES, Kibana, text-embeddings).
+## OLLAMA=1 ajoute le moteur historique et tire son modèle.
 start: env venv
 	$(COMPOSE) up -d --wait
-	$(COMPOSE) --profile init up --force-recreate ollama-init
+ifeq ($(OLLAMA),1)
+	$(COMPOSE) --profile ollama-init up --force-recreate ollama-init
+endif
 	@echo ""
 	@echo "  Elasticsearch  http://localhost:9200"
 	@echo "  Kibana         http://localhost:5601"
-	@echo "  Ollama         http://localhost:11434"
-ifeq ($(TEI),1)
 	@echo "  TEI            http://localhost:8080"
-	@echo ""
-	@echo "  Le premier démarrage télécharge nomic-embed-text-v1.5 depuis HuggingFace."
-	@echo "  Attendre « Ready » : docker logs -f search-lab-tei"
+ifeq ($(OLLAMA),1)
+	@echo "  Ollama         http://localhost:11434"
 endif
+	@echo ""
+	@echo "  Le premier démarrage de TEI télécharge nomic-embed-text-v1.5 (~550 Mo)."
+	@echo "  Attendre « Ready » avant d'ingérer : docker logs -f search-lab-tei"
 
 ## Tout arrêter (les données ES et les modèles Ollama sont conservés)
 stop:
@@ -69,13 +71,13 @@ dry-run: env venv
 
 ## Ingestion complète (1.4M docs) dans un index versionné neuf, alias basculé à la fin.
 ## Options : LIMIT=100000 pour un sous-ensemble, EMBED_BATCH=512 pour des lots plus gros,
-## BACKEND=tei pour changer de moteur, WORKERS=8 pour la concurrence,
+## BACKEND=ollama pour repasser sur le moteur historique, WORKERS=8 pour la concurrence,
 ## INCREMENTAL=1 pour réécrire dans l'index en service au lieu d'en construire un neuf.
 ingest: env venv
 	$(PYTHON) $(PIPELINE) $(if $(INCREMENTAL),,--recreate) $(if $(LIMIT),--limit $(LIMIT)) $(if $(EMBED_BATCH),--embed-batch $(EMBED_BATCH)) $(if $(BACKEND),--backend $(BACKEND)) $(if $(WORKERS),--workers $(WORKERS))
 
-## Compare les vecteurs des deux moteurs sur les mêmes titres. Exige Ollama ET TEI
-## démarrés : make start TEI=1. Options : LIMIT=1000.
+## Compare les vecteurs des deux moteurs sur les mêmes titres. Exige les deux démarrés :
+## make start OLLAMA=1. Options : LIMIT=1000.
 compare: env venv
 	$(PYTHON) tools/compare_embeddings.py $(if $(LIMIT),--limit $(LIMIT))
 
