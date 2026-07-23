@@ -5,9 +5,10 @@ Nothing downstream knows which one answered — `EMBED_BACKEND` picks it at star
 rest of the pipeline is unchanged.
 
 There is one today, `tei`. The indirection is kept because swapping the engine is not a
-neutral operation and deserves an explicit seam: two servers running nominally the same
-model produced vectors at a mean cosine of 0.51 on this dataset, which is why Ollama is no
-longer here. An index is bound to the engine that built it.
+neutral operation and deserves an explicit seam. The predecessor, Ollama, was not producing
+*different* vectors from TEI — it was producing vectors with no semantic content at all,
+and it served a 1.4M-document index for a week without a single check going red. See
+`embeddings/preflight.py`, which exists because of it.
 """
 
 from typing import Protocol

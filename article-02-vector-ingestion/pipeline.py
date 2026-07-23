@@ -7,6 +7,7 @@ text-embeddings-inference), and the returned vectors are attached as `embedding`
 """
 
 import argparse
+import json
 import logging
 import sys
 from collections.abc import Iterator
@@ -36,6 +37,7 @@ from shared.es.client import (
 )
 from shared.es.verify import ProbeReservoir, verify_vector_index
 from embeddings.backends import get_backend
+from embeddings.preflight import check_embedding_backend
 from embeddings.stream import embed_stream
 from transforms.product import transform
 
@@ -63,6 +65,22 @@ VECTOR_MAX_SEGMENTS: int | None = None
 # Nombre de sondes du contrôle de rappel en fin de run. Chaque sonde fait une recherche
 # exacte sur tout l'index — comptez ~35 s par sonde sur 1,4M documents.
 VERIFY_PROBES = 5
+
+
+def mapping_dims(path: Path) -> int | None:
+    """The `dims` the mapping declares for the embedding field, if it declares one.
+
+    Handed to the pre-flight check so a model/mapping mismatch is caught in two seconds
+    rather than as a bulk rejection on every one of 1.4M documents.
+    """
+    with open(path, "r") as f:
+        mapping = json.load(f)
+    return (
+        mapping.get("mappings", {})
+        .get("properties", {})
+        .get("embedding", {})
+        .get("dims")
+    )
 
 
 def download_from_kaggle(dest: Path) -> Path:
@@ -124,13 +142,9 @@ def run(
     recreate: bool = False,
     backend_name: str | None = None,
     workers: int | None = None,
+    skip_checks: bool = False,
 ) -> None:
     """Execute the ingestion pipeline."""
-    if not csv_path.exists():
-        csv_path = download_from_kaggle(csv_path)
-
-    logger.info("Reading CSV: %s", csv_path)
-
     backend = get_backend(backend_name)
     workers = workers or config.EMBED_WORKERS
     logger.info(
@@ -140,6 +154,30 @@ def run(
         embed_batch,
         config.EMBED_DOC_PREFIX,
     )
+
+    # Avant tout le reste : le moteur répond-il, et ses vecteurs veulent-ils dire quelque
+    # chose ? Deux secondes ici valent mieux que neuf minutes d'embedding sur un moteur
+    # qui rend du bruit — c'est arrivé, et aucun autre contrôle ne l'a vu.
+    if not skip_checks:
+        preflight = check_embedding_backend(
+            backend,
+            prefix=config.EMBED_DOC_PREFIX,
+            expect_dims=mapping_dims(MAPPING_PATH),
+        )
+        logger.info("Preflight — %s", preflight.summary())
+        if not preflight.ok:
+            for failure in preflight.failures:
+                logger.error("  %s", failure)
+            raise SystemExit(
+                "The embedding backend failed its semantic check. Nothing was read, "
+                "nothing was indexed, no index was created — fix the engine before "
+                "spending a run on it. Override with --skip-checks."
+            )
+
+    if not csv_path.exists():
+        csv_path = download_from_kaggle(csv_path)
+
+    logger.info("Reading CSV: %s", csv_path)
 
     if dry_run:
         stream = tqdm(
@@ -292,6 +330,14 @@ if __name__ == "__main__":
         help=f"Concurrent embedding requests (default: {config.EMBED_WORKERS})",
     )
     parser.add_argument(
+        "--skip-checks",
+        action="store_true",
+        help=(
+            "Skip the embedding backend's semantic pre-flight. For fast iteration only — "
+            "it is the one check that catches an engine returning meaningless vectors"
+        ),
+    )
+    parser.add_argument(
         "--recreate",
         action="store_true",
         help=(
@@ -309,4 +355,5 @@ if __name__ == "__main__":
         recreate=args.recreate,
         backend_name=args.backend,
         workers=args.workers,
+        skip_checks=args.skip_checks,
     )

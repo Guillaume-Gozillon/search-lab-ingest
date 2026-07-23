@@ -118,6 +118,7 @@ search-lab-ingest/
 │   ├── transforms/                      # raw row → ES document
 │   ├── embeddings/
 │   │   ├── stream.py                    # concurrent, order-preserving embed stage
+│   │   ├── preflight.py                 # is the engine producing meaningful vectors?
 │   │   └── backends/                    # tei, selected by EMBED_BACKEND
 │   └── pipeline.py                      # main entry point
 ├── docker/

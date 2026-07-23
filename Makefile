@@ -52,14 +52,15 @@ clean:
 
 ## Validation : transforme et embed 1000 docs sans rien indexer
 dry-run: env venv
-	$(PYTHON) $(PIPELINE) --dry-run --limit 1000 $(if $(WORKERS),--workers $(WORKERS))
+	$(PYTHON) $(PIPELINE) --dry-run --limit 1000 $(if $(WORKERS),--workers $(WORKERS)) $(if $(SKIP_CHECKS),--skip-checks)
 
 ## Ingestion complète (1.4M docs) dans un index versionné neuf, alias basculé à la fin.
 ## Options : LIMIT=100000 pour un sous-ensemble, EMBED_BATCH=512 pour des lots plus gros,
 ## WORKERS=8 pour la concurrence,
-## INCREMENTAL=1 pour réécrire dans l'index en service au lieu d'en construire un neuf.
+## INCREMENTAL=1 pour réécrire dans l'index en service au lieu d'en construire un neuf,
+## SKIP_CHECKS=1 pour sauter le contrôle sémantique du moteur (itérations rapides SEULEMENT).
 ingest: env venv
-	$(PYTHON) $(PIPELINE) $(if $(INCREMENTAL),,--recreate) $(if $(LIMIT),--limit $(LIMIT)) $(if $(EMBED_BATCH),--embed-batch $(EMBED_BATCH)) $(if $(WORKERS),--workers $(WORKERS))
+	$(PYTHON) $(PIPELINE) $(if $(INCREMENTAL),,--recreate) $(if $(LIMIT),--limit $(LIMIT)) $(if $(EMBED_BATCH),--embed-batch $(EMBED_BATCH)) $(if $(WORKERS),--workers $(WORKERS)) $(if $(SKIP_CHECKS),--skip-checks)
 
 env:
 	@test -f .env || (cp .env.example .env && echo "→ .env créé depuis .env.example")

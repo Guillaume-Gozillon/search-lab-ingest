@@ -84,15 +84,20 @@ flowchart TD
 ```
 
 TEI is built for this one job: dynamic server-side batching, no generation-sized context to
-pad 28-token titles into. The pipeline ran on Ollama first and moved off it — the two
-produced vectors at a mean cosine of **0.51** on the same model and the same titles, and
-the cause was never established. TEI is the one kept because it can state what it is
-running; a GGUF conversion cannot.
+pad 28-token titles into. The pipeline ran on Ollama first and moved off it. The two
+produced vectors at a mean cosine of 0.51 on the same model and the same titles, which
+looked at first like two implementations disagreeing. It was not. Ollama was producing
+vectors with **no semantic content at all** — nearest neighbour inside a theme 11 % of the
+time, worse than chance, and intra-theme similarity *below* inter-theme (−0.0083 against
+TEI's +0.2652). It returned 5 distinct vectors for 9 distinct texts.
 
-The seam is kept for a single backend because swapping engines is not a neutral operation.
-An index built with one engine and queried with another returns plausible nonsense,
-silently. Not even the recall gate catches it — it probes with vectors drawn from the
-index, so it only ever measures inside a single embedding space.
+A 1.4M-document index was built and served on those vectors, and every check in this
+project was green while it happened. That is what `embeddings/preflight.py` exists to make
+impossible, and it is a different question from the one `shared/es/verify.py` asks.
+
+The seam is kept for a single backend because swapping engines is not a neutral operation:
+an index built with one engine and queried with another returns plausible nonsense,
+silently.
 
 ## 4. Configuration and infrastructure
 
@@ -138,6 +143,13 @@ sequenceDiagram
     participant ES as Elasticsearch
     participant B as embedding backend
 
+    P->>B: preflight — 24 themed titles, 1 call
+    B-->>P: 24 vectors
+    Note over P: nearest neighbour in-theme? dims match the mapping?
+    alt engine unreachable, wrong dims, or vectors carry no meaning
+        P->>P: SystemExit — nothing read, nothing created
+    end
+
     P->>ES: ensure_index — create if absent
     P->>ES: optimize_for_import<br/>refresh_interval=-1, replicas=0
     Note over P,ES: import mode: no refresh, no replication
@@ -160,8 +172,15 @@ sequenceDiagram
     end
 ```
 
+The two gates bracket the run and ask different questions. The pre-flight asks *does this
+engine produce meaningful vectors* — cheap, and worthless after the fact. The recall gate
+asks *does this graph retrieve them* — expensive, and meaningless before the index exists.
+Either one alone would have missed the failure the other catches.
+
 No force merge: `VECTOR_MAX_SEGMENTS` is `None`, for the reasons in
-[the README](README.md#recall--is-the-index-actually-searchable).
+[the README](README.md#recall--is-the-index-actually-searchable) — at the cost of 9 GB of
+`_recovery_source` that never gets purged, which is
+[an open question](README.md#it-does-not-save-anything-yet--_recovery_source).
 
 `--dry-run` short-circuits everything touching Elasticsearch: it transforms, embeds, and
 logs the vector length plus the first 5 dimensions of the first document. That is the
@@ -205,6 +224,7 @@ flowchart TD
     L5["EMBED_QUERY_PREFIX has no consumer here"] --> I5["enabling prefixes only does half the job<br/>the search side must match"]
     L6["--recreate re-embeds all 1.4M titles"] --> I6["iterating on the mapping costs a full<br/>embedding run → an embedding cache would fix it"]
     L7["TEI pinned to a July 2025 model revision"] --> I7["upstream main does not parse under TEI<br/>→ revisit the pin, do not assume it is stale"]
+    L8["_recovery_source is never purged"] --> I8["9 GB of 15 GB — the _source exclusion<br/>saves nothing until a merge runs"]
 
     style L0 fill:#c0392b,color:#fff
     style L1 fill:#e67e22,color:#fff
@@ -214,11 +234,13 @@ flowchart TD
     style L5 fill:#c0392b,color:#fff
     style L6 fill:#e67e22,color:#fff
     style L7 fill:#e67e22,color:#fff
+    style L8 fill:#e67e22,color:#fff
 ```
 
 **On L0 —** the one that costs the most when you get it wrong, because getting it wrong
-produces no symptom at all. Measured, not theoretical: this pipeline ran on Ollama before
-TEI, and the same model on the same titles gave a mean cosine of 0.51 between the two.
+produces no symptom at all. Measured, not theoretical: the previous engine produced vectors
+whose nearest neighbour landed in the right theme 11 % of the time, and a full index was
+built and served on them without a single check going red.
 See [the README](README.md#why-the-engine-is-not-interchangeable).
 
 **On L1 —** the single-thread stall that used to cap the pipeline at ~500 docs/s is gone:

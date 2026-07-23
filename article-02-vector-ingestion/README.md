@@ -91,6 +91,7 @@ make ingest LIMIT=100000         # subset
 make ingest EMBED_BATCH=512      # larger embedding batches
 make ingest WORKERS=8            # more requests in flight
 make ingest INCREMENTAL=1        # rewrite the live index instead of building a new one
+make ingest SKIP_CHECKS=1        # skip the pre-flight — fast iteration only
 ```
 
 `make ingest` defaults to `--recreate` and to the **full** dataset — `LIMIT` is the opt-in.
@@ -173,6 +174,7 @@ article-02-vector-ingestion/
 │   └── product.py                              # CSV row → ES document (skips rows with no title)
 ├── embeddings/
 │   ├── stream.py                               # concurrent, order-preserving embed stage
+│   ├── preflight.py                            # semantic check of the engine, before ingesting
 │   └── backends/
 │       ├── __init__.py                         # get_backend() — EMBED_BACKEND resolution
 │       └── tei.py                              # POST /embed, retries 429
@@ -180,26 +182,30 @@ article-02-vector-ingestion/
 ```
 
 Shared with the rest of the repo: `shared/es/verify.py`, which holds the recall gate and the
-probe sampler.
+probe sampler. The two gates live apart on purpose — `preflight.py` knows about embedding
+engines and nothing about Elasticsearch, `verify.py` the reverse.
 
 ## What the pipeline does
 
-1. Creates the index from `mappings/amazon_products_embeddings_v1.json` (skips if exists)
-2. Optimizes index settings for bulk import (`refresh_interval: -1`, `replicas: 0`)
-3. Reads the CSV in chunks of 10 000 rows with pandas
-4. Transforms each row, skipping rows with no ASIN or no title
-5. Batches titles, keeps `EMBED_WORKERS` embedding requests in flight, attaches the returned vectors as `embedding`
-6. Keeps a uniform sample of vectors on the way past — the only chance to, since they are not readable afterwards
-7. Bulk-indexes with `chunk_size=2000` via `streaming_bulk`
-8. Restores settings (`refresh_interval: 1s`, `replicas: ES_REPLICAS`) and refreshes
-9. Measures recall against an exact scan — **and refuses to publish a build that fails**
-10. Points the `products_embeddings` alias at the index it just wrote
+1. **Pre-flight** — embeds two dozen themed titles and refuses to start if the engine is unreachable, returns the wrong dimensions, or produces vectors with no semantic content
+2. Creates the index from `mappings/amazon_products_embeddings_v1.json` (skips if exists)
+3. Optimizes index settings for bulk import (`refresh_interval: -1`, `replicas: 0`)
+4. Reads the CSV in chunks of 10 000 rows with pandas
+5. Transforms each row, skipping rows with no ASIN or no title
+6. Batches titles, keeps `EMBED_WORKERS` embedding requests in flight, attaches the returned vectors as `embedding`
+7. Keeps a uniform sample of vectors on the way past — the only chance to, since they are not readable afterwards
+8. Bulk-indexes with `chunk_size=2000` via `streaming_bulk`
+9. Restores settings (`refresh_interval: 1s`, `replicas: ES_REPLICAS`) and refreshes
+10. Measures recall against an exact scan — **and refuses to publish a build that fails**
+11. Points the `products_embeddings` alias at the index it just wrote
 
-There is deliberately no force merge — see [Recall](#recall--is-the-index-actually-searchable).
+Steps 1 and 10 are the two gates, and they are not redundant: one validates the engine before any work is done, the other validates the HNSW graph before anything is published.
+
+There is deliberately no force merge — see [Recall](#recall--is-the-index-actually-searchable), and [`_recovery_source`](#it-does-not-save-anything-yet--_recovery_source) for what that currently costs in disk.
 
 ## Embedding choices
 
-- **Model:** `nomic-embed-text` — 768 dims, open-weights, runs on CPU or GPU.
+- **Model:** `nomic-embed-text-v1.5` — 768 dims, open-weights, pinned revision.
 - **Field:** `title` only. Short, descriptive, and the field most users would search semantically.
 - **Similarity:** `cosine` — the default for normalized text embeddings.
 - **Index type:** `int8_hnsw` with `m: 32`, `ef_construction: 200`. ES 9 would default to `m: 16, ef_construction: 100`, which measurably under-serves 1.4M vectors — the explicit values are worth their indexing cost, see below.
@@ -232,15 +238,49 @@ The upstream commit *v5 Transformers* (2026-04-07) added `max_position_embedding
 
 ### Why the engine is not interchangeable
 
-This pipeline ran on [Ollama](https://ollama.com) first. Both servers were pointed at the same model, `nomic-embed-text-v1.5`, and asked for the same 1 000 titles. The vectors came back at a **mean cosine of 0.51** — minimum 0.35, median 0.50, and not one pair above 0.95.
+This pipeline ran on [Ollama](https://ollama.com) first. Both servers were pointed at the same model, `nomic-embed-text-v1.5`, and asked for the same 1 000 titles. The vectors came back at a **mean cosine of 0.51** — median 0.50, nothing above 0.95.
 
-That is not the signature of a task prefix, which sits at 0.684 on this dataset. Two servers claiming the same model produced measurably different embeddings, and the cause was never established. TEI is the one kept, on verifiability rather than on a benchmark: it implements the sentence-transformers reference pipeline (transformer → mean pooling → L2 normalize) and reports what it is doing. Ollama's GGUF conversion reports none of that — `ollama show` cannot even distinguish nomic v1 from v1.5, both being 137M parameters. When two things disagree, keep the one that can tell you what it did.
+The first reading was "two implementations disagree, keep the verifiable one". That reading was wrong, and the correction is the most useful thing in this article. Ollama was not producing *different* embeddings. It was producing embeddings with **no semantic content at all**. Nearest neighbours computed on the vectors actually stored in the index it built:
 
-**The failure mode is worth understanding even now that there is only one engine.** Nothing errors. Both produced perfectly valid 768-float unit vectors; Elasticsearch indexed them, the HNSW graph built, kNN answered, the recall gate passed. An embedding only means something relative to other vectors from the same model — so an index built with one engine and *queried* with the other returns ten plausible-looking products that have nothing to do with the query. No exception, no warning, no counter out of place.
+| Title | Its nearest neighbour, according to those vectors | cosine |
+|---|---|---|
+| Womens Shacket … Button Down Shirts | Vintage Copper Train London **Pocket Watch** | 0.9995 |
+| Womens Mens Lightweight **Sneaker** … Shoes | 12PCS Gold Chunky **Rings** for Women | 0.9754 |
+| Bluetooth Car **FM Transmitter** | Flexible **3D Printer** Build Plate | 0.8019 |
 
-The recall gate does not protect you here either: it probes with vectors drawn from the index itself, so it measures inside a single embedding space by construction. It proves the graph retrieves what it was given, not that what it was given means what you think.
+Measured properly, on three themes of three obviously-related titles each:
 
-So: **an index is bound to the engine and the model revision that built it.** Changing either means rebuilding, and the query side has to move at the same time. Same shape of trap as the task prefixes below.
+| | intra-theme | inter-theme | separation | nearest neighbour correct |
+|---|---|---|---|---|
+| Ollama | 0.8013 | 0.8097 | **−0.0083** | **11 %** — worse than chance |
+| TEI | 0.6254 | 0.3602 | **+0.2652** | **100 %** |
+
+Everything about those vectors was structurally perfect. 768 floats, L2 norm 1.0000, `docs.count` correct to the document, and the recall gate passing at 90 %. It also returned only **5 distinct vectors for 9 distinct texts** — identical whether called in batches or one at a time, so not a batching bug. Spearman correlation between the two engines' similarity structures: **0.0986**, near-total independence.
+
+A 1.4M-document index was served on that, and nothing went red.
+
+### Why nothing caught it
+
+`verify_vector_index` compares approximate kNN against an exact scan **over the same vectors**. If those vectors are noise, both methods retrieve the same noise and recall is excellent. It measures the quality of the HNSW graph, not the quality of the embeddings. Norms, dimensions and counts were green for the same reason: none of them look at meaning.
+
+That hole is now closed by `embeddings/preflight.py`, which runs **before** the first CSV row is read:
+
+```
+Preflight — tei — 768d, nearest neighbour in-theme 100%, intra 0.6254 / inter 0.3602
+                  (separation +0.2652) over 24 titles in 6 themes
+```
+
+It embeds two dozen product titles grouped into six disjoint themes and checks that each title's nearest neighbour stays inside its own theme. One embedding call, about two seconds — because finding out the engine is broken must not cost nine minutes of embedding followed by a gate at the end. It also catches an unreachable backend, a dimension mismatch against the mapping, and an engine collapsing distinct inputs onto the same vector.
+
+The floors are 80 % in-theme neighbours and a separation of +0.05. Like `min_recall`, they are floors for *broken*, not targets for *good* — the two engines measured sit at 11 %/−0.008 and 100 %/+0.265, so anything in between separates them without risking a false alarm. Raising them will not improve anything; that is not what they measure.
+
+`--skip-checks` (or `make ingest SKIP_CHECKS=1`) turns it off for fast iteration. It is not the default and should not become it.
+
+The two gates are complementary and neither sees what the other sees: **pre-flight validates the engine, `verify_vector_index` validates the graph.**
+
+### What this still means
+
+An index is bound to the engine and the model revision that built it. Changing either means rebuilding, and the query side has to move at the same time. An index built with one engine and *queried* with another returns ten plausible-looking products that have nothing to do with the query — no exception, no warning, no counter out of place. Same shape of trap as the task prefixes below.
 
 ## Task prefixes: the trap that does not raise
 
@@ -257,15 +297,74 @@ Turning the prefixes on commits you to two things at once: **rebuilding the inde
 
 ## The vector is not in `_source`
 
-The mapping carries `"_source": {"excludes": ["embedding"]}`. `_source` was 10.7 KB per document, ~8 KB of it the vector serialized as JSON text; dropping it divides storage by roughly 3 and takes the same weight off every background merge.
+The mapping carries `"_source": {"excludes": ["embedding"]}`. `_source` was 10.7 KB per document, ~8 KB of it the vector serialized as JSON text.
 
 What it costs, and it is not nothing:
 
 - **No `_reindex` without re-embedding.** Rebuilding the index means running the pipeline again from the CSV. That is what `--recreate` does anyway, so it is a real constraint rather than a lost habit.
-- **The vector does not come back in hits.** Any "more like this document" flow needs the query vector from somewhere else.
+- **The vector does not come back in hits** — see [Reading a stored vector](#reading-a-stored-vector) for the one way that still works.
 - **The recall gate cannot sample its own probes.** `verify_vector_index` used to read probe vectors out of `_source`; with the exclusion in place that returns nothing, and the gate would fail every single run. `ProbeReservoir` taps the ingestion stream and keeps a uniform sample as the documents go past — reservoir sampling, not the first N, because the CSV is sorted by category and a head slice is one narrow corner of the catalogue.
 
-Removing the exclusion re-enables everything above and puts ~11 GB back on disk for the full dataset.
+### It does not save anything yet — `_recovery_source`
+
+This is the non-obvious part, and it was invisible until someone ran `_disk_usage` on the built index:
+
+```
+total 15.16 GB
+  _recovery_source     9.05 GB   59.7%
+  embedding            5.53 GB   36.5%
+  _source              0.39 GB    2.6%
+  title                0.06 GB    0.4%
+```
+
+The exclusion works exactly as advertised — real `_source` is down to 0.39 GB. But **as soon as `_source` is filtered, Elasticsearch stores a `_recovery_source` alongside it**: a complete copy, embedding included, kept for shard recovery. It is only dropped by a **segment merge**, and only once the `index.soft_deletes.retention_lease.period` lease (12 h by default) has expired.
+
+This index shows **37 segments and `merges total: 0`**. No merge has ever run — the force merge was removed (see [Recall](#recall--is-the-index-actually-searchable)) and the index is quiescent after the build, so nothing triggers one.
+
+Net result today: 15.16 GB with the exclusion, against 14.2 GB for the previous index without it. **The optimization currently costs about 1 GB instead of saving 11.** In steady state, once a merge has run, it would be ~6.1 GB — 2.3× smaller. The saving is real; it is just not reachable without a merge.
+
+Four avenues, none of them measured yet, listed honestly:
+
+1. **Check whether merges are genuinely never happening.** `merges total: 0` was read shortly after the run. Background merges are asynchronous; re-read `_stats/merge` some hours later before concluding. If natural merges do eventually run, the 9 GB frees itself once the lease expires and there is nothing to do.
+2. **Force merge, if the recall cost has changed.** The −5 points were measured at `m: 16, ef_construction: 100`. The mapping is `m: 32, ef_construction: 200` now, and a denser graph may absorb the merge better. This needs measuring — the protocol is below.
+3. **Shorten `index.soft_deletes.retention_lease.period`.** It does not trigger a merge, it only makes the lease expire sooner so that any merge which does happen purges the recovery source. Useful in combination with 1 or 2, useless alone.
+4. **Drop the exclusion.** No `_source` filtering means no `_recovery_source` at all, and the index lands back at ~14.2 GB with the vector retrievable and `_reindex` possible again. Worse than a merged exclusion, better than the current state.
+
+### Protocol for re-measuring the force merge
+
+A full run now takes **8.9 minutes**, which makes this experiment cheap in a way it was not at 47 minutes. Build both indices rather than merging one in place, so the comparison is paired and nothing has to be un-done:
+
+```bash
+make ingest EMBED_BATCH=512                     # v_n   — leave unmerged
+make ingest EMBED_BATCH=512                     # v_n+1 — merge this one
+curl -X POST 'localhost:9200/<v_n+1>/_forcemerge?max_num_segments=1'
+```
+
+Then, against **both** indices with the same probe documents (same ASINs, so the comparison is paired rather than two independent samples):
+
+- recall@10 vs an exact `script_score` scan, **30 probes minimum** — the gate's 5 are far too coarse to compare two configurations
+- at `num_candidates` 100, 500 and 2000, each with and without `rescore_vector: {oversample: 4}`
+- record for each: `_disk_usage` breakdown, `_recovery_source` share, segment count, and how long the merge itself took
+
+Decide with the rule written down first, not after seeing the numbers. A defensible one: **merge if the recall loss at `num_candidates: 500` with oversample 4 stays under 2 points.** That is the configuration a real query would use, and 9 GB is worth two points there. If it costs 5 points again, as it did at `m: 16`, it is not worth it — leave `VECTOR_MAX_SEGMENTS` at `None` and take avenue 1 or 4 instead.
+
+Nothing here is implemented. `VECTOR_MAX_SEGMENTS` is still `None`, and it should stay that way until there are numbers.
+
+### Reading a stored vector
+
+Since `embedding` is out of `_source`, it appears neither in Kibana Discover nor via the `fields` parameter — `fields` returns the other fields and silently omits it. `docvalue_fields` is the way:
+
+```json
+GET products_embeddings/_search
+{
+  "size": 1,
+  "query": { "match": { "title": "headphones" } },
+  "_source": ["title"],
+  "docvalue_fields": ["embedding"]
+}
+```
+
+Verified: returns all 768 dimensions, norm 1.0.
 
 ## Recall — is the index actually searchable?
 
@@ -306,11 +405,19 @@ The floor is set at 40 %, deliberately a bar for *broken* rather than a target f
 
 ## Performance notes
 
-The embedding stage is the bottleneck — one call per document over 1.4M items would run for hours. Three levers matter, and they are not worth the same.
+**Where it ended up:** 1 426 336 documents in **8.9 minutes**, ~2 670 docs/s, on an RTX 5060 Ti at 100 % utilization drawing 169 W of its 180 W budget. That is 5.3× the starting point, and the card is now genuinely the thing working rather than the thing waiting.
+
+| | Throughput | Full dataset |
+|---|---|---|
+| Starting point — single thread, Ollama, batch 128 | 321 docs/s | ~74 min |
+| Same, batch 512 | 504 docs/s | ~47 min |
+| **Concurrent pipeline, TEI, batch 512** | **2 670 docs/s** | **8.9 min** |
+
+The rest of this section is how it got there, because the order the levers were pulled in matters more than the final number.
 
 ### Where the model runs, and how big the batches are
 
-Measured on an RTX 5060 Ti (16 GB) with `--dry-run`, **on the single-threaded pipeline and on Ollama** — that is, the configuration this article started from. The numbers isolate transform + embed with no bulk indexing in the way, and they are the baseline everything below is measured against:
+Measured on the RTX 5060 Ti with `--dry-run`, **on the single-threaded pipeline and on Ollama** — the configuration this article started from. The numbers isolate transform + embed with no bulk indexing in the way:
 
 | Setup | Throughput | Extrapolated to 1.4M |
 |-------|-----------|----------------------|
@@ -351,11 +458,13 @@ POST /embed "HTTP/1.1 429 Too Many Requests"     ×7
 POST /embed "HTTP/1.1 200 OK"                    ×1
 ```
 
-It has to cover `--workers × 2 × --embed-batch` — 4 096 at the defaults, hence the 8 192 in the compose file. `TeiBackend` retries a 429 with exponential backoff on top of that, so a transient burst costs a few hundred milliseconds instead of a 47-minute run.
+It has to cover `--workers × 2 × --embed-batch` — 4 096 at the defaults, hence the 8 192 in the compose file. `TeiBackend` retries a 429 with exponential backoff on top of that, so a transient burst costs a few hundred milliseconds instead of a nine-minute run.
 
-Past that, the ceiling moves off the GPU entirely: at 3 436 docs/s the bulk stage becomes the limit, which is ~7 min for the full dataset.
+### Where the ceiling is now
 
-**Not yet measured.** The throughput table above is the single-threaded Ollama baseline. Re-run `make dry-run` and a full `make ingest EMBED_BATCH=512` to put real figures against the concurrent pipeline on TEI — nothing in this section beyond the baseline table has been benchmarked.
+At 2 670 docs/s the pipeline is running at **78 % of the measured bulk-indexing ceiling** of 3 436 docs/s. That was the prediction and it held: once the embedding stage stops being the bottleneck, Elasticsearch becomes it. The remaining ~2 minutes of headroom are worth roughly nothing on a 9-minute run.
+
+Two consequences worth naming. First, `orjson` matters now — `json.dumps` on a document carrying 768 floats measured 4 990 docs/s, which is uncomfortably close to where the pipeline is operating; that is why `build_es_client` hands the client an `OrjsonSerializer` explicitly rather than hoping. Second, the GPU at 169 W is no longer where you should look for time. `BULK_CHUNK_SIZE` was measured and dismissed (2 000 → 3 436 docs/s, 500 → 3 218 docs/s); the next real lever would be an embedding cache so that re-runs over an unchanged CSV skip the model entirely.
 
 ### Subset
 
