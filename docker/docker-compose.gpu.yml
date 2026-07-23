@@ -11,3 +11,15 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+
+  # text-embeddings garde le profil `tei` déclaré dans le fichier de base : cet override
+  # ne le démarre pas, il lui donne le GPU quand `make start TEI=1` le démarre. L'image
+  # est une image CUDA — sans cette réservation elle n'a aucun intérêt.
+  text-embeddings:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

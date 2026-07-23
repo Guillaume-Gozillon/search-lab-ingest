@@ -5,6 +5,9 @@
   },
   "mappings": {
     "dynamic": "strict",
+    "_source": {
+      "excludes": ["embedding"]
+    },
     "properties": {
       "asin":        { "type": "keyword" },
       "title":       { "type": "text", "analyzer": "english" },

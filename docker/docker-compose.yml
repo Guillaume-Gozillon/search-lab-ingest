@@ -1,5 +1,5 @@
-# Dev machine (16GB RAM)
-# Start: docker compose -f docker/docker-compose.yml up -d
+# Stack du lab. Démarrée par le Makefile, qui ajoute docker-compose.gpu.yml quand la
+# machine expose un runtime nvidia : `make start`.
 
 services:
   elasticsearch:
@@ -9,12 +9,18 @@ services:
       - discovery.type=single-node
       - xpack.security.enabled=false
       - xpack.security.http.ssl.enabled=false
-      - ES_JAVA_OPTS=-Xms2g -Xmx2g
+      # Construire un graphe HNSW sur 1,4M vecteurs laissait le heap à 69 % d'occupation
+      # avec 2g. Réglable par ES_HEAP dans .env.
+      - ES_JAVA_OPTS=-Xms${ES_HEAP:-6g} -Xmx${ES_HEAP:-6g}
     ports:
       - "9200:9200"
     volumes:
       - esdata:/usr/share/elasticsearch/data
-    mem_limit: 4g
+    # Très au-dessus du heap, et c'est voulu : les fichiers Lucene sont mmapés, donc leur
+    # page cache est facturé au cgroup du conteneur. Les vecteurs quantifiés int8 pèsent
+    # à eux seuls ~1,1 Go (1,4M × 768). Une limite au ras du heap fait tuer le JVM par
+    # l'OOM killer au moment de la fusion des segments.
+    mem_limit: 12g
     healthcheck:
       test: curl -sf http://localhost:9200/_cluster/health | grep -q '"status":"green"\|"status":"yellow"'
       interval: 10s
@@ -36,6 +42,12 @@ services:
   ollama:
     image: ollama/ollama:latest
     container_name: search-lab-ollama
+    environment:
+      # Ollama sérialise les requêtes quand ce réglage vaut 1. Le pipeline en pousse
+      # EMBED_WORKERS en parallèle : sans ça elles font la queue et seul le recouvrement
+      # avec le bulk Elasticsearch est gagné. nomic-embed-text tient dans ~700 Mo de
+      # VRAM, quatre slots logent sans peine dans 16 Go.
+      - OLLAMA_NUM_PARALLEL=${OLLAMA_NUM_PARALLEL:-4}
     ports:
       - "11434:11434"
     volumes:
@@ -60,6 +72,35 @@ services:
     entrypoint: ["sh", "-c", "ollama pull nomic-embed-text"]
     restart: "no"
 
+  # Moteur d'embedding spécialisé — voir EMBED_BACKEND. Sous profil : `make start` ne le
+  # démarre pas, `make start TEI=1` oui. Inutile de lui faire occuper de la VRAM tant que
+  # le pipeline tourne sur Ollama.
+  #
+  # Le tag `120-*` cible Blackwell / compute capability 12.0 (RTX 50X0). `latest` est
+  # compilé pour Ampere 8.0 et `89-*` pour Ada : ni l'un ni l'autre ne démarre sur sm_120.
+  # HuggingFace marque cette variante « experimental ».
+  #
+  # Pas de healthcheck : le premier démarrage télécharge le modèle depuis HuggingFace, et
+  # l'image ne garantit pas la présence de curl. Suivre `docker logs -f search-lab-tei`
+  # jusqu'à « Ready » avant de lancer une ingestion.
+  text-embeddings:
+    image: ghcr.io/huggingface/text-embeddings-inference:120-1.9.3
+    container_name: search-lab-tei
+    profiles: ["tei"]
+    command:
+      - --model-id=nomic-ai/nomic-embed-text-v1.5
+      - --dtype=float16
+      # Défaut 32 : rejetterait tout --embed-batch plus large avec un 413.
+      - --max-client-batch-size=512
+      - --max-batch-tokens=32768
+      - --auto-truncate
+    ports:
+      - "8080:80"
+    volumes:
+      - hfcache:/data
+    mem_limit: 4g
+
 volumes:
   esdata:
   ollamadata:
+  hfcache:

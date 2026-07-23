@@ -10,14 +10,60 @@ So this module does not check that the vectors exist. It checks that searching f
 them, by comparing the approximate kNN against an exact brute-force scan over the same
 index. Exact search is expensive — tens of seconds per probe on a million documents —
 which is why the probe count is small and configurable rather than free.
+
+Probe vectors come from one of two places. `ProbeReservoir` taps the ingestion stream and
+keeps a uniform sample of the documents as they go past; that is the only option once the
+mapping excludes `embedding` from `_source`, because the vectors can no longer be read
+back out of the index. Failing that, `verify_vector_index` samples them from the index
+itself, which still works anywhere the vectors live in `_source`.
 """
 
 import logging
+import random
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 
 from elasticsearch import Elasticsearch
 
 logger = logging.getLogger(__name__)
+
+# (_id, vecteur) — l'identifiant sert à mesurer l'auto-récupération.
+Probe = tuple[str, list[float]]
+
+
+class ProbeReservoir:
+    """Pass-through sampler: yields every document, keeps `size` of them uniformly.
+
+    Reservoir sampling (Algorithm R), so the sample is uniform over a stream whose length
+    is not known in advance, at the cost of one `random()` per document — roughly 0.1 s
+    across 1.4M. Keeping the first N would be cheaper and much worse: this CSV is sorted
+    by category, so the head of the stream is one narrow slice of the catalogue.
+
+    Tap it between the embedding stage and the bulk stage. The documents have to carry
+    their vector already, and they have to still be on their way into the index.
+    """
+
+    def __init__(
+        self, size: int, seed: int = 0, embedding_field: str = "embedding"
+    ) -> None:
+        self.size = size
+        self.items: list[Probe] = []
+        self._rng = random.Random(seed)
+        self._field = embedding_field
+        self._seen = 0
+
+    def tap(self, docs: Iterable[dict]) -> Iterator[dict]:
+        for doc in docs:
+            vector = doc.get(self._field)
+            if vector is not None:
+                self._seen += 1
+                if len(self.items) < self.size:
+                    self.items.append((doc["_id"], vector))
+                else:
+                    slot = self._rng.randrange(self._seen)
+                    if slot < self.size:
+                        self.items[slot] = (doc["_id"], vector)
+            yield doc
 
 
 @dataclass
@@ -85,6 +131,32 @@ def _ann_top(client, index, field_name, vector, k, num_candidates):
     return {h["_id"] for h in res["hits"]["hits"]}
 
 
+def _sample_probes(client, index, field_name, probes, seed) -> list[Probe]:
+    """Draw probe vectors back out of the index — the fallback when none were captured.
+
+    Returns an empty list when the mapping excludes `field_name` from `_source`. That is
+    not an error at this level: it means the caller has to supply `probe_vectors`, and
+    `verify_vector_index` says so.
+    """
+    hits = client.options(request_timeout=600).search(
+        index=index,
+        size=probes,
+        query={
+            "function_score": {
+                "query": {"exists": {"field": field_name}},
+                "random_score": {"seed": seed, "field": "_seq_no"},
+            }
+        },
+        source=[field_name],
+    )["hits"]["hits"]
+
+    return [
+        (hit["_id"], hit["_source"][field_name])
+        for hit in hits
+        if hit.get("_source", {}).get(field_name)
+    ]
+
+
 def verify_vector_index(
     client: Elasticsearch,
     index: str,
@@ -94,15 +166,19 @@ def verify_vector_index(
     num_candidates: int = 500,
     min_recall: float = 0.40,
     seed: int = 0,
+    probe_vectors: Sequence[Probe] | None = None,
 ) -> VerifyReport:
     """Check that `index` is complete *and* that its kNN actually retrieves.
 
-    Probe queries are the embeddings of documents drawn from the index itself. That matters
-    more than it looks: a document is its own nearest neighbour, so every probe has a
-    genuine, well-separated neighbourhood. Hand-written text queries do not — on this
-    dataset their ranks 2-10 sit within 0.04 cosine of one another, so thousands of the
-    1.4M documents are effectively tied and recall@k degenerates into measuring which ties
-    the ANN happened to return.
+    Probe queries are the embeddings of documents that are in the index. That matters more
+    than it looks: a document is its own nearest neighbour, so every probe has a genuine,
+    well-separated neighbourhood. Hand-written text queries do not — on this dataset their
+    ranks 2-10 sit within 0.04 cosine of one another, so thousands of the 1.4M documents
+    are effectively tied and recall@k degenerates into measuring which ties the ANN
+    happened to return.
+
+    Pass `probe_vectors` (see `ProbeReservoir`) when the mapping keeps `embedding` out of
+    `_source`; otherwise they are sampled from the index.
 
     `min_recall` is a floor for *broken*, not a target for *good*. Measured on the full
     index at these defaults: 68% on a naturally-merged index, 63% on one force-merged to a
@@ -132,21 +208,19 @@ def verify_vector_index(
         # toute façon, et chaque sonde coûte une recherche exacte sur tout l'index.
         return report
 
-    sample = client.options(request_timeout=600).search(
-        index=index,
-        size=probes,
-        query={
-            "function_score": {
-                "query": {"exists": {"field": field_name}},
-                "random_score": {"seed": seed, "field": "_seq_no"},
-            }
-        },
-        source=[field_name],
-    )["hits"]["hits"]
+    if probe_vectors is None:
+        probe_vectors = _sample_probes(client, index, field_name, probes, seed)
+
+    if not probe_vectors:
+        report.failures.append(
+            f"no probe vector available — '{field_name}' is indexed but absent from "
+            f"_source, so it cannot be read back. Capture probes during ingestion with "
+            f"ProbeReservoir and pass them as probe_vectors."
+        )
+        return report
 
     recalls, self_hits = [], 0
-    for hit in sample:
-        vector = hit["_source"].get(field_name)
+    for doc_id, vector in list(probe_vectors)[:probes]:
         if not vector:
             continue
 
@@ -156,7 +230,7 @@ def verify_vector_index(
         found = _ann_top(client, index, field_name, vector, k, num_candidates)
 
         recalls.append(len(truth & found) / len(truth))
-        self_hits += hit["_id"] in found
+        self_hits += doc_id in found
 
     if not recalls:
         report.failures.append("no probe returned a usable neighbourhood")

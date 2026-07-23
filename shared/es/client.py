@@ -20,7 +20,22 @@ _VERSION_RE = re.compile(r"_v(\d+)(?:_\d{8}-\d{4})?$")
 
 
 def build_es_client() -> Elasticsearch:
-    return Elasticsearch(ES_URL)
+    """Build the ES client, preferring orjson for serialization when it is installed.
+
+    Elasticsearch-py ships an `OrjsonSerializer` but keeps the standard library one as the
+    default — installing orjson is not enough, it has to be handed over explicitly.
+
+    It matters here because serializing a document carrying 768 floats is the hot path:
+    `json.dumps` measured 4 990 docs/s at 15.5 KB per document, which is invisible while
+    embedding runs at ~450 docs/s and becomes the ceiling as soon as it does not.
+    """
+    try:
+        from elasticsearch.serializer import OrjsonSerializer
+    except ImportError:
+        # orjson absent : la stdlib fait le même travail, plus lentement.
+        return Elasticsearch(ES_URL)
+
+    return Elasticsearch(ES_URL, serializer=OrjsonSerializer())
 
 
 def ensure_index(client: Elasticsearch, index: str, mapping_path: str) -> None:

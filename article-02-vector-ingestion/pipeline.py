@@ -1,8 +1,9 @@
 """Bulk-index the Kaggle Amazon Products CSV into Elasticsearch with title embeddings.
 
 Same shape as article-01's pipeline, with one extra stage between transform and bulk:
-title strings are batched and sent to Ollama, and the returned vectors are attached
-as `embedding` (dense_vector, 768d) on each document.
+title strings are batched, sent to an embedding backend (Ollama or TEI, see
+`EMBED_BACKEND`), and the returned vectors are attached as `embedding` (dense_vector,
+768d) on each document.
 """
 
 import argparse
@@ -12,7 +13,6 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pandas as pd
-from ollama import Client
 from tqdm import tqdm
 
 repo_root = Path(__file__).resolve().parent.parent
@@ -34,8 +34,9 @@ from shared.es.client import (
     next_version_index,
     resolve_write_index,
 )
-from shared.es.verify import verify_vector_index
-from embeddings.ollama import embed_stream
+from shared.es.verify import ProbeReservoir, verify_vector_index
+from embeddings.backends import get_backend
+from embeddings.stream import embed_stream
 from transforms.product import transform
 
 logger = logging.getLogger(__name__)
@@ -121,6 +122,8 @@ def run(
     limit: int | None = None,
     embed_batch: int = EMBED_BATCH_SIZE,
     recreate: bool = False,
+    backend_name: str | None = None,
+    workers: int | None = None,
 ) -> None:
     """Execute the ingestion pipeline."""
     if not csv_path.exists():
@@ -128,7 +131,15 @@ def run(
 
     logger.info("Reading CSV: %s", csv_path)
 
-    ollama_client = Client(host=config.OLLAMA_URL)
+    backend = get_backend(backend_name)
+    workers = workers or config.EMBED_WORKERS
+    logger.info(
+        "Embedding via %s — %d workers, batch %d, doc prefix %r",
+        backend.describe(),
+        workers,
+        embed_batch,
+        config.EMBED_DOC_PREFIX,
+    )
 
     if dry_run:
         stream = tqdm(
@@ -138,9 +149,10 @@ def run(
         )
         embedded = embed_stream(
             stream,
-            ollama_client,
-            model=config.OLLAMA_EMBED_MODEL,
+            backend,
             batch_size=embed_batch,
+            workers=workers,
+            prefix=config.EMBED_DOC_PREFIX,
         )
         count = 0
         for doc in tqdm(embedded, desc="dry-run-embed", unit="docs"):
@@ -177,11 +189,19 @@ def run(
     )
     embedded_stream = embed_stream(
         raw_stream,
-        ollama_client,
-        model=config.OLLAMA_EMBED_MODEL,
+        backend,
         batch_size=embed_batch,
+        workers=workers,
+        prefix=config.EMBED_DOC_PREFIX,
     )
-    indexed, errors = bulk_index(es_client, embedded_stream, chunk_size=BULK_CHUNK_SIZE)
+
+    # Les vecteurs sont exclus de `_source` : ils ne seront plus relisibles depuis l'index.
+    # On en garde un échantillon uniforme au passage, c'est la seule occasion de le faire.
+    reservoir = ProbeReservoir(size=VERIFY_PROBES)
+
+    indexed, errors = bulk_index(
+        es_client, reservoir.tap(embedded_stream), chunk_size=BULK_CHUNK_SIZE
+    )
     logger.info("Indexed %d documents, %d errors", indexed, len(errors))
 
     restore_after_import(es_client, index_name)
@@ -195,7 +215,12 @@ def run(
     # Un index peut être complet, bien formé, et malgré tout inutilisable en recherche :
     # compter les documents ne dit rien de la capacité du graphe HNSW à les retrouver.
     # On mesure avant de publier.
-    report = verify_vector_index(es_client, index_name, probes=VERIFY_PROBES)
+    report = verify_vector_index(
+        es_client,
+        index_name,
+        probes=VERIFY_PROBES,
+        probe_vectors=reservoir.items or None,
+    )
     logger.info("Verification — %s", report.summary())
     if not report.ok:
         for failure in report.failures:
@@ -253,7 +278,18 @@ if __name__ == "__main__":
         "--embed-batch",
         type=int,
         default=EMBED_BATCH_SIZE,
-        help=f"Ollama embedding batch size (default: {EMBED_BATCH_SIZE})",
+        help=f"Texts per embedding request (default: {EMBED_BATCH_SIZE})",
+    )
+    parser.add_argument(
+        "--backend",
+        default=None,
+        help=f"Embedding backend: ollama or tei (default: {config.EMBED_BACKEND})",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help=f"Concurrent embedding requests (default: {config.EMBED_WORKERS})",
     )
     parser.add_argument(
         "--recreate",
@@ -271,4 +307,6 @@ if __name__ == "__main__":
         limit=args.limit,
         embed_batch=args.embed_batch,
         recreate=args.recreate,
+        backend_name=args.backend,
+        workers=args.workers,
     )

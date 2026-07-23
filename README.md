@@ -25,15 +25,22 @@ manual venv step — every target depends on it.
 | Command | Effect |
 |---------|--------|
 | `make start` | venv + dependencies + docker stack + model pull |
-| `make stop` | stop the containers, **keep** the volumes (ES data, Ollama models) |
+| `make start TEI=1` | same, plus the `text-embeddings` service (see article-02) |
+| `make stop` | stop the containers, **keep** the volumes (ES data, Ollama models, HF cache) |
 | `make clean` | stop and **delete** the volumes and the venv |
 | `make status` / `make logs` | `compose ps` / follow the logs |
 
 - Elasticsearch — `http://localhost:9200` (plain HTTP, security disabled: local lab, not a deployment)
 - Kibana — `http://localhost:5601`
 - Ollama — `http://localhost:11434`
+- text-embeddings — `http://localhost:8080`, only with `TEI=1`
 
 If the default `python3` is older than 3.10, pass a newer one: `make start PY=python3.12`.
+
+Elasticsearch runs with a 6 GB heap in a 12 GB container. The gap is deliberate: Lucene files
+are mmapped, so their page cache is charged to the container's cgroup, and a limit set at the
+heap gets the JVM OOM-killed mid-merge. Override the heap with `ES_HEAP` in `.env`, and move
+`mem_limit` with it.
 
 ## GPU acceleration
 
@@ -46,8 +53,8 @@ GPU ?= $(shell command -v nvidia-smi ... && docker info ... | grep -q nvidia && 
 
 Both halves must hold: an NVIDIA driver **and** the `nvidia` runtime registered in Docker by
 the Container Toolkit. When they do, `docker/docker-compose.gpu.yml` is layered onto the base
-compose file and the `ollama` container receives the device passthrough. Otherwise the
-override is skipped and Ollama falls back to CPU.
+compose file and the `ollama` and `text-embeddings` containers receive the device
+passthrough. Otherwise the override is skipped and Ollama falls back to CPU.
 
 | Command | Effect |
 |---------|--------|
@@ -92,7 +99,7 @@ problem sits below Docker: check that `nvidia-container-toolkit` is installed an
 | Folder | Topic |
 |--------|-------|
 | [article-01-csv-bulk-ingestion](./article-01-csv-bulk-ingestion) | Bulk-index a 1.4M-row Kaggle CSV into ES with pandas |
-| [article-02-vector-ingestion](./article-02-vector-ingestion) | Add 768-dim `dense_vector` embeddings at ingestion time via Ollama |
+| [article-02-vector-ingestion](./article-02-vector-ingestion) | Add 768-dim `dense_vector` embeddings at ingestion time, via Ollama or TEI |
 
 ## Project structure
 
@@ -102,7 +109,8 @@ search-lab-ingest/
 │   ├── config.py                        # central config (env vars)
 │   └── es/
 │       ├── client.py                    # ES client factory + index helpers
-│       └── bulk.py                      # bulk_index, update_alias, optimize_for_import, forcemerge
+│       ├── bulk.py                      # bulk_index, update_alias, optimize_for_import, forcemerge
+│       └── verify.py                    # recall gate + ProbeReservoir — blocks a bad alias swap
 ├── article-01-csv-bulk-ingestion/
 │   ├── data/                            # gitignored — put CSV here
 │   ├── mappings/                        # ES index mappings
@@ -112,10 +120,14 @@ search-lab-ingest/
 │   ├── data/                            # gitignored — put CSV here
 │   ├── mappings/                        # ES index mapping with dense_vector
 │   ├── transforms/                      # raw row → ES document
-│   ├── embeddings/                      # Ollama batch embedding helper
+│   ├── embeddings/
+│   │   ├── stream.py                    # concurrent, order-preserving embed stage
+│   │   └── backends/                    # ollama | tei, chosen by EMBED_BACKEND
 │   └── pipeline.py                      # main entry point
+├── tools/
+│   └── compare_embeddings.py            # do both backends produce the same vectors?
 ├── docker/
-│   ├── docker-compose.yml               # ES, Kibana, Ollama — no GPU config
+│   ├── docker-compose.yml               # ES, Kibana, Ollama, TEI (profile) — no GPU config
 │   └── docker-compose.gpu.yml           # NVIDIA passthrough, layered on when detected
 ├── Makefile                             # start/stop/ingest, GPU auto-detection
 ├── .env.example
