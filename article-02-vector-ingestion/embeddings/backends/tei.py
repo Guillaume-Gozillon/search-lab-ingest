@@ -95,10 +95,10 @@ class TeiBackend:
     def info(self) -> dict:
         """TEI's `/info` — model id, revision, pooling, max input length.
 
-        Worth reading before trusting any comparison: it names the exact model revision,
-        which `ollama show` does not (v1 and v1.5 both report 137M parameters). It also
-        reveals a `--default-prompt` picked up from the model repo, which would silently
-        prefix every vector.
+        Worth reading before trusting an index: it names the exact model revision the
+        server is running, which is the only way to know the pin in docker-compose.yml
+        took effect. It also reveals a `--default-prompt` picked up from the model repo,
+        which would silently prefix every vector.
         """
         response = self._client.get("/info")
         response.raise_for_status()

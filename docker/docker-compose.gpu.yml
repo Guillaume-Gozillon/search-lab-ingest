@@ -3,19 +3,9 @@
 # `make start GPU=1` le force, `GPU=0` l'écarte.
 
 services:
-  ollama:
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-
-  # text-embeddings est le moteur du projet et démarre par défaut. L'image est une image
-  # CUDA : sans cette réservation elle n'a aucun intérêt — et c'est aussi pourquoi un
-  # conteneur qui atteint « Ready » a forcément le GPU, contrairement à Ollama qui
-  # retombe sur le CPU sans rien dire.
+  # L'image de text-embeddings est une image CUDA : sans cette réservation elle n'a aucun
+  # intérêt, et elle ne démarre pas. C'est aussi ce qui rend le diagnostic simple —
+  # un conteneur qui atteint « Ready » a forcément le GPU.
   text-embeddings:
     deploy:
       resources:

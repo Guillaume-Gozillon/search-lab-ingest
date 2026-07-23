@@ -1,6 +1,6 @@
 # Article 02 — Vector Ingestion
 
-Enriches the article-01 pipeline with vector embeddings: same Kaggle **Amazon Products Dataset 2023**, same Elasticsearch instance, but each document gets a 768-dim `dense_vector` generated at ingestion time by `nomic-embed-text-v1.5`, served by [text-embeddings-inference](https://github.com/huggingface/text-embeddings-inference). [Ollama](https://ollama.com) is still wired in as an opt-in — see [The embedding backend](#the-embedding-backend) for why it is no longer the default.
+Enriches the article-01 pipeline with vector embeddings: same Kaggle **Amazon Products Dataset 2023**, same Elasticsearch instance, but each document gets a 768-dim `dense_vector` generated at ingestion time by `nomic-embed-text-v1.5`, served by [text-embeddings-inference](https://github.com/huggingface/text-embeddings-inference).
 
 **Dataset:** [Amazon Products Dataset 2023 (1.4M products)](https://www.kaggle.com/datasets/asaniczka/amazon-products-dataset-2023-1-4m-products) — download `amazon_products.csv` and place it in `article-02-vector-ingestion/data/`.
 
@@ -21,7 +21,7 @@ flowchart LR
         BULK["bulk_index<br/>chunk=2,000"]
         READ --> TRANSFORM --> EMBED --> BULK
     end
-    BACKEND["EMBED_BACKEND<br/>tei :8080 (default)<br/>or ollama :11434"]
+    BACKEND["text-embeddings-inference<br/>nomic-embed-text-v1.5<br/>:8080"]
     ES[("Elasticsearch<br/>amazon_products_embeddings<br/>:9200")]
 
     CSV --> READ
@@ -90,7 +90,6 @@ make ingest                      # full 1.4M dataset into a fresh versioned inde
 make ingest LIMIT=100000         # subset
 make ingest EMBED_BATCH=512      # larger embedding batches
 make ingest WORKERS=8            # more requests in flight
-make ingest BACKEND=ollama       # historical engine (needs make start OLLAMA=1)
 make ingest INCREMENTAL=1        # rewrite the live index instead of building a new one
 ```
 
@@ -176,13 +175,12 @@ article-02-vector-ingestion/
 │   ├── stream.py                               # concurrent, order-preserving embed stage
 │   └── backends/
 │       ├── __init__.py                         # get_backend() — EMBED_BACKEND resolution
-│       ├── ollama.py                           # POST /api/embed
-│       └── tei.py                              # POST /embed
+│       └── tei.py                              # POST /embed, retries 429
 └── pipeline.py                                 # main entry point
 ```
 
-Shared with the rest of the repo: `shared/es/verify.py` (the recall gate and the probe
-sampler) and `tools/compare_embeddings.py` (backend comparison).
+Shared with the rest of the repo: `shared/es/verify.py`, which holds the recall gate and the
+probe sampler.
 
 ## What the pipeline does
 
@@ -209,16 +207,7 @@ There is deliberately no force merge — see [Recall](#recall--is-the-index-actu
 
 ## The embedding backend
 
-`EMBED_BACKEND` picks the engine. **TEI is the default and the one this index is built with.** Ollama is kept as an opt-in, and the section below explains why it stopped being the answer.
-
-| | `tei` (default) | `ollama` (opt-in) |
-|---|---|---|
-| What it is | purpose-built embedding server | general generation engine |
-| Batching | dynamic, server-side | one request at a time per slot |
-| Concurrency ceiling | `--max-concurrent-requests` | `OLLAMA_NUM_PARALLEL` |
-| Padding | tokenizer-length batches | 28-token titles into a large context |
-| Pipeline | reported by `/info`: mean pooling, dtype, revision | GGUF conversion, not introspectable |
-| Started by | `make start` | `make start OLLAMA=1` |
+Embeddings come from [text-embeddings-inference](https://github.com/huggingface/text-embeddings-inference), a server built for this one job: it batches dynamically, it does not pad 28-token titles into a generation-sized context, and its `/info` states exactly which model SHA, dtype and pooling it is running.
 
 ```bash
 make start                       # ES + Kibana + text-embeddings
@@ -226,22 +215,7 @@ docker logs -f search-lab-tei    # wait for "Ready" — first start downloads th
 make ingest EMBED_BATCH=512
 ```
 
-### They do not produce the same vectors
-
-Measured with `make compare`, 1 000 titles spread across the catalogue, both engines serving what is nominally `nomic-embed-text-v1.5`:
-
-```
-  mean    0.5095        min  0.3469        p50  0.5002        max  0.9402
-  > 0.999      0        0.99–0.999   0     0.95–0.99   0      <= 0.95   1000
-```
-
-Not one pair above 0.95. This is **not** the signature of a task prefix — that one sits at 0.684 and is why the reading grid below names it explicitly. Two engines that claim the same model are producing measurably different embeddings, and the cause has not been established.
-
-TEI is the one kept, for a reason that is about verifiability rather than a benchmark: it implements the sentence-transformers reference pipeline (transformer → mean pooling → L2 normalize) and its `/info` reports exactly which model SHA, dtype and pooling it is running. Ollama's GGUF conversion reports none of that, and `ollama show` cannot even distinguish nomic v1 from v1.5 — both are 137M parameters. When two things disagree, keep the one that can tell you what it did.
-
-**What this means in practice.** Nothing errors. TEI produces perfectly valid 768-float unit vectors, Elasticsearch indexes them, the HNSW graph builds, kNN answers, and the recall gate passes. An embedding only means something relative to other vectors from the same model — so an index built with one engine and *queried* with the other returns ten plausible-looking products that have nothing to do with the query. No exception, no warning, no counter out of place. Same failure mode as the task prefixes below.
-
-The recall gate does not protect you here either: it probes with vectors drawn from the index itself, so it is measuring inside a single space by construction. It proves the graph retrieves what it was given, not that what it was given means what you think.
+`EMBED_BACKEND` selects it. There is one backend today; the seam is kept because swapping engines is not a neutral operation — see below.
 
 ### The image tag and the pinned revision
 
@@ -256,22 +230,17 @@ Caused by: duplicate field `max_position_embeddings` at line 42 column 15
 
 The upstream commit *v5 Transformers* (2026-04-07) added `max_position_embeddings` to a `config.json` that already declared `n_positions`. TEI aliases the two onto the same field, so serde sees a duplicate and the parse fails before a single weight is loaded. The compose file pins `e5cf08aa`, the last commit before that change — same weights, `1_Pooling/config.json` still says `pooling_mode_mean_tokens: true`. Drop the pin once upstream fixes the config, not before, and confirm with `curl -s localhost:8080/info` that `model_sha` is what you asked for.
 
-### Comparing the two, if you ever need to
+### Why the engine is not interchangeable
 
-```bash
-make start OLLAMA=1              # brings the historical engine back up
-make compare LIMIT=1000
-```
+This pipeline ran on [Ollama](https://ollama.com) first. Both servers were pointed at the same model, `nomic-embed-text-v1.5`, and asked for the same 1 000 titles. The vectors came back at a **mean cosine of 0.51** — minimum 0.35, median 0.50, and not one pair above 0.95.
 
-`tools/compare_embeddings.py` embeds the same titles through both and reports the cosine distribution. Reading the mean:
+That is not the signature of a task prefix, which sits at 0.684 on this dataset. Two servers claiming the same model produced measurably different embeddings, and the cause was never established. TEI is the one kept, on verifiability rather than on a benchmark: it implements the sentence-transformers reference pipeline (transformer → mean pooling → L2 normalize) and reports what it is doing. Ollama's GGUF conversion reports none of that — `ollama show` cannot even distinguish nomic v1 from v1.5, both being 137M parameters. When two things disagree, keep the one that can tell you what it did.
 
-| mean cosine | reading |
-|---|---|
-| > 0.999 | same model, same convention — interchangeable |
-| ~ 0.99 | kernel and dtype differences, benign |
-| ~ 0.68 | a task prefix applied on **one side only** — measured signature on this dataset |
-| ~ 0.51 | what these two actually give. Different weights or a different pipeline; cause not established |
-| < 0.95 otherwise | investigate. Do not rebuild an index on the assumption it is noise |
+**The failure mode is worth understanding even now that there is only one engine.** Nothing errors. Both produced perfectly valid 768-float unit vectors; Elasticsearch indexed them, the HNSW graph built, kNN answered, the recall gate passed. An embedding only means something relative to other vectors from the same model — so an index built with one engine and *queried* with the other returns ten plausible-looking products that have nothing to do with the query. No exception, no warning, no counter out of place.
+
+The recall gate does not protect you here either: it probes with vectors drawn from the index itself, so it measures inside a single embedding space by construction. It proves the graph retrieves what it was given, not that what it was given means what you think.
+
+So: **an index is bound to the engine and the model revision that built it.** Changing either means rebuilding, and the query side has to move at the same time. Same shape of trap as the task prefixes below.
 
 ## Task prefixes: the trap that does not raise
 
@@ -284,7 +253,7 @@ cos(title, "search_document: " + title) = 0.684
 cos(title, "search_query: "    + title) = 0.952
 ```
 
-Turning the prefixes on commits you to two things at once: **rebuilding the index** with `EMBED_DOC_PREFIX`, and **applying `EMBED_QUERY_PREFIX` on every query**. Doing one without the other produces an index that still answers, still ranks, and is quietly worse — nothing raises, no count is off, no log line changes. `EMBED_QUERY_PREFIX` has no consumer in this repo, because there is no search side here yet; it is declared so the pairing is documented, and `make compare` prints what a mismatch costs.
+Turning the prefixes on commits you to two things at once: **rebuilding the index** with `EMBED_DOC_PREFIX`, and **applying `EMBED_QUERY_PREFIX` on every query**. Doing one without the other produces an index that still answers, still ranks, and is quietly worse — nothing raises, no count is off, no log line changes. `EMBED_QUERY_PREFIX` has no consumer in this repo, because there is no search side here yet; it is declared so that the pairing is documented rather than discovered later.
 
 ## The vector is not in `_source`
 
@@ -375,10 +344,14 @@ The idle half was structural rather than a tuning problem. The pipeline was a si
 
 `embed_stream` now keeps `EMBED_WORKERS` requests in flight (default 4), so the seven minutes of bulk indexing come off the critical path and the CSV is parsed while the GPU works. Order and memory are preserved — see [Architecture](#architecture).
 
-That alone is bounded by what the server will accept, and the two engines refuse differently — which is worth knowing before you turn `WORKERS` up:
+That alone is bounded by what the server will accept, and TEI refuses loudly — worth knowing before you turn `WORKERS` up. It answers `429 Model is overloaded` the instant its queue is full, and **`--max-concurrent-requests` counts one permit per input, not per request**. At the default 512, a single batch of 512 titles fills the whole queue and every concurrent batch bounces:
 
-- **Ollama** answers `OLLAMA_NUM_PARALLEL` requests at a time and silently *queues* the rest. Nothing fails; the extra workers simply wait. The compose file sets it to 4 to match `EMBED_WORKERS`.
-- **TEI** answers `429 Model is overloaded` the instant its queue is full, and `--max-concurrent-requests` counts **one permit per input, not per request**. At the default 512, a single batch of 512 titles fills it and every concurrent batch bounces. It has to cover `--workers × 2 × --embed-batch` — 4 096 at the defaults, hence the 8 192 in the compose file. `TeiBackend` also retries a 429 with backoff, so a transient burst costs a few hundred milliseconds instead of a 47-minute run.
+```
+POST /embed "HTTP/1.1 429 Too Many Requests"     ×7
+POST /embed "HTTP/1.1 200 OK"                    ×1
+```
+
+It has to cover `--workers × 2 × --embed-batch` — 4 096 at the defaults, hence the 8 192 in the compose file. `TeiBackend` retries a 429 with exponential backoff on top of that, so a transient burst costs a few hundred milliseconds instead of a 47-minute run.
 
 Past that, the ceiling moves off the GPU entirely: at 3 436 docs/s the bulk stage becomes the limit, which is ~7 min for the full dataset.
 

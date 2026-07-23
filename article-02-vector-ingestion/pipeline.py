@@ -1,9 +1,9 @@
 """Bulk-index the Kaggle Amazon Products CSV into Elasticsearch with title embeddings.
 
 Same shape as article-01's pipeline, with one extra stage between transform and bulk:
-title strings are batched, sent to an embedding backend (Ollama or TEI, see
-`EMBED_BACKEND`), and the returned vectors are attached as `embedding` (dense_vector,
-768d) on each document.
+title strings are batched, sent to the embedding backend (`EMBED_BACKEND`, served by
+text-embeddings-inference), and the returned vectors are attached as `embedding`
+(dense_vector, 768d) on each document.
 """
 
 import argparse
@@ -283,7 +283,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--backend",
         default=None,
-        help=f"Embedding backend: ollama or tei (default: {config.EMBED_BACKEND})",
+        help=f"Embedding backend (default: {config.EMBED_BACKEND})",
     )
     parser.add_argument(
         "--workers",

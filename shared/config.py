@@ -18,23 +18,19 @@ ES_EMBEDDINGS_ALIAS: str = os.getenv("ES_EMBEDDINGS_ALIAS", "products_embeddings
 # un vrai cluster.
 ES_REPLICAS: int = int(os.getenv("ES_REPLICAS", "0"))
 
-OLLAMA_URL: str = os.getenv("OLLAMA_URL", "http://localhost:11434")
-OLLAMA_EMBED_MODEL: str = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
-OLLAMA_EMBED_DIMS: int = int(os.getenv("OLLAMA_EMBED_DIMS", "768"))
-
 # URL de text-embeddings-inference. Le modèle n'est pas un paramètre côté client : il est
 # fixé par le `--model-id` du conteneur, un serveur TEI ne sert qu'un modèle.
 TEI_URL: str = os.getenv("TEI_URL", "http://localhost:8080")
 
-# Moteur d'embedding : `tei` (défaut) ou `ollama`. Les deux servent nomic-embed-text-v1.5
-# et ne produisent PAS les mêmes vecteurs — cosinus moyen mesuré à 0,51 sur 1000 titres.
-# Un index construit avec l'un ne s'interroge pas avec l'autre : voir le README.
+# Moteur d'embedding. `tei` est le seul aujourd'hui. Changer de moteur n'est pas une
+# opération neutre : un index est lié à celui qui l'a construit, et rien ne signale un
+# mélange. Voir le README.
 EMBED_BACKEND: str = os.getenv("EMBED_BACKEND", "tei").strip().lower()
 
 # Requêtes d'embedding en vol. Le pipeline est un seul thread qui lit le CSV, embed, puis
 # bulk : sans concurrence, le GPU attend pendant le bulk et le bulk attend pendant le GPU.
-# Ne sert que si le serveur accepte de paralléliser — Ollama plafonne à
-# OLLAMA_NUM_PARALLEL, TEI batche dynamiquement sans limite déclarée.
+# TEI batche dynamiquement, mais son --max-concurrent-requests compte un permis par input :
+# il doit couvrir EMBED_WORKERS × 2 × la taille de lot, sinon 429.
 EMBED_WORKERS: int = int(os.getenv("EMBED_WORKERS", "4"))
 
 # Préfixes de tâche nomic-embed-text-v1.5, entraîné avec `search_document: ` à

@@ -39,45 +39,7 @@ services:
         condition: service_healthy
     mem_limit: 1g
 
-  # Moteur historique, gardé pour pouvoir relire les index construits avant la bascule et
-  # pour `make compare`. Sous profil : `make start OLLAMA=1`. Il ne sert plus à l'ingestion,
-  # voir EMBED_BACKEND.
-  ollama:
-    image: ollama/ollama:latest
-    container_name: search-lab-ollama
-    profiles: ["ollama"]
-    environment:
-      # Ollama sérialise les requêtes quand ce réglage vaut 1. Le pipeline en pousse
-      # EMBED_WORKERS en parallèle : sans ça elles font la queue et seul le recouvrement
-      # avec le bulk Elasticsearch est gagné. nomic-embed-text tient dans ~700 Mo de
-      # VRAM, quatre slots logent sans peine dans 16 Go.
-      - OLLAMA_NUM_PARALLEL=${OLLAMA_NUM_PARALLEL:-4}
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollamadata:/root/.ollama
-    healthcheck:
-      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-
-  ollama-init:
-    image: ollama/ollama:latest
-    container_name: search-lab-ollama-init
-    # Job one-shot : profil distinct de `ollama` pour rester hors du `up --wait` (Compose
-    # traite tout conteneur sorti comme un échec, même en exit 0). Lancé explicitement par
-    # le Makefile, qui active les deux profils à la fois.
-    profiles: ["ollama-init"]
-    depends_on:
-      ollama:
-        condition: service_healthy
-    environment:
-      - OLLAMA_HOST=ollama:11434
-    entrypoint: ["sh", "-c", "ollama pull nomic-embed-text"]
-    restart: "no"
-
-  # LE moteur d'embedding du projet — voir EMBED_BACKEND. Démarré par défaut.
+  # Le moteur d'embedding du projet.
   #
   # Le tag `120-*` cible Blackwell / compute capability 12.0 (RTX 50X0). `latest` est
   # compilé pour Ampere 8.0 et `89-*` pour Ada : ni l'un ni l'autre ne démarre sur sm_120.
@@ -115,5 +77,4 @@ services:
 
 volumes:
   esdata:
-  ollamadata:
   hfcache:

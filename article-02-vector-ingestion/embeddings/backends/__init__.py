@@ -1,15 +1,13 @@
-"""Pluggable embedding backends.
+"""Embedding backends.
 
-Both backends turn a list of strings into a list of vectors, in order, one vector per
-input. Nothing downstream needs to know which one answered — `EMBED_BACKEND` picks one at
-startup and the rest of the pipeline is unchanged.
+A backend turns a list of strings into a list of vectors, in order, one vector per input.
+Nothing downstream knows which one answered — `EMBED_BACKEND` picks it at startup and the
+rest of the pipeline is unchanged.
 
-Why there are two: Ollama is a token-by-token generation engine pressed into embedding
-service. It serves one request at a time unless `OLLAMA_NUM_PARALLEL` says otherwise, and
-it pads 28-token titles into a 2048-token context. text-embeddings-inference is built for
-this one job and batches dynamically. Same model, so the vectors should be
-interchangeable — `tools/compare_embeddings.py` exists to prove that before you swap the
-backend on an index you care about.
+There is one today, `tei`. The indirection is kept because swapping the engine is not a
+neutral operation and deserves an explicit seam: two servers running nominally the same
+model produced vectors at a mean cosine of 0.51 on this dataset, which is why Ollama is no
+longer here. An index is bound to the engine that built it.
 """
 
 from typing import Protocol
@@ -29,21 +27,16 @@ class EmbeddingBackend(Protocol):
         ...
 
 
-BACKENDS = ("ollama", "tei")
+BACKENDS = ("tei",)
 
 
 def get_backend(name: str | None = None) -> EmbeddingBackend:
     """Build the backend called `name`, defaulting to `EMBED_BACKEND`.
 
-    The imports are deferred so that a backend which is misconfigured, or whose service is
-    not running, only breaks the run that actually asked for it.
+    The import is deferred so that a misconfigured backend, or one whose service is down,
+    only breaks the run that actually asked for it.
     """
     resolved = (name or config.EMBED_BACKEND).strip().lower()
-
-    if resolved == "ollama":
-        from .ollama import OllamaBackend
-
-        return OllamaBackend()
 
     if resolved == "tei":
         from .tei import TeiBackend

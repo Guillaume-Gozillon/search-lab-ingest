@@ -24,15 +24,13 @@ brings up the containers. There is no manual venv step — every target depends 
 | Command | Effect |
 |---------|--------|
 | `make start` | venv + dependencies + Elasticsearch, Kibana, text-embeddings |
-| `make start OLLAMA=1` | same, plus the historical Ollama engine and its model pull |
-| `make stop` | stop the containers, **keep** the volumes (ES data, HF cache, Ollama models) |
+| `make stop` | stop the containers, **keep** the volumes (ES data, HF model cache) |
 | `make clean` | stop and **delete** the volumes and the venv |
 | `make status` / `make logs` | `compose ps` / follow the logs |
 
 - Elasticsearch — `http://localhost:9200` (plain HTTP, security disabled: local lab, not a deployment)
 - Kibana — `http://localhost:5601`
 - text-embeddings — `http://localhost:8080`
-- Ollama — `http://localhost:11434`, only with `OLLAMA=1`
 
 The first `make start` downloads `nomic-embed-text-v1.5` from HuggingFace into the `hfcache`
 volume (~550 MB). `up --wait` only waits for the container to be running, not for the model
@@ -57,8 +55,8 @@ GPU ?= $(shell command -v nvidia-smi ... && docker info ... | grep -q nvidia && 
 
 Both halves must hold: an NVIDIA driver **and** the `nvidia` runtime registered in Docker by
 the Container Toolkit. When they do, `docker/docker-compose.gpu.yml` is layered onto the base
-compose file and the `ollama` and `text-embeddings` containers receive the device
-passthrough. Otherwise the override is skipped.
+compose file and the `text-embeddings` container receives the device passthrough. Otherwise
+the override is skipped.
 
 | Command | Effect |
 |---------|--------|
@@ -83,18 +81,9 @@ docker inspect search-lab-tei --format '{{json .HostConfig.DeviceRequests}}'
 Note that `HostConfig.Runtime` stays `runc` even on GPU — the devices arrive through
 `DeviceRequests`, so that field is not the signal to read.
 
-For text-embeddings there is a second, blunter signal: the `120-*` image is a CUDA build, so
-a container that reaches *Ready* at all has the device. Silent CPU fallback is an Ollama
-failure mode, not a TEI one.
-
-If you brought Ollama back with `OLLAMA=1`, it needs its own checks, because it *will* fall
-back to CPU without saying so:
-
-```bash
-docker exec search-lab-ollama ollama ps          # PROCESSOR = 100% GPU   (100% CPU = missed)
-docker logs search-lab-ollama 2>&1 | grep offloaded | tail -1
-# → offloaded 13/13 layers to GPU                                     0/13 = CPU-only
-```
+There is a second, blunter signal: the `120-*` image is a CUDA build, so a container that
+reaches *Ready* at all has the device. This stack has no silent CPU fallback — the model
+server either gets the GPU or refuses to start.
 
 Troubleshooting: `DeviceRequests: null` means the stack was started without the override —
 `make stop && make start GPU=1`. If it is populated and the container still will not run, the
@@ -129,12 +118,10 @@ search-lab-ingest/
 │   ├── transforms/                      # raw row → ES document
 │   ├── embeddings/
 │   │   ├── stream.py                    # concurrent, order-preserving embed stage
-│   │   └── backends/                    # tei (default) | ollama, chosen by EMBED_BACKEND
+│   │   └── backends/                    # tei, selected by EMBED_BACKEND
 │   └── pipeline.py                      # main entry point
-├── tools/
-│   └── compare_embeddings.py            # do both backends produce the same vectors?
 ├── docker/
-│   ├── docker-compose.yml               # ES, Kibana, TEI + Ollama (profile) — no GPU config
+│   ├── docker-compose.yml               # ES, Kibana, text-embeddings — no GPU config
 │   └── docker-compose.gpu.yml           # NVIDIA passthrough, layered on when detected
 ├── Makefile                             # start/stop/ingest, GPU auto-detection
 ├── .env.example
