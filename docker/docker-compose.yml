@@ -89,6 +89,12 @@ services:
     profiles: ["tei"]
     command:
       - --model-id=nomic-ai/nomic-embed-text-v1.5
+      # Révision épinglée. Le commit « v5 Transformers » du 2026-04-07 a ajouté
+      # `max_position_embeddings` à un config.json qui déclarait déjà `n_positions` ;
+      # TEI mappe les deux sur le même champ et refuse de démarrer :
+      # « Failed to parse config.json: duplicate field max_position_embeddings ».
+      # e5cf08aa est le dernier commit avant, mêmes poids, mean pooling identique.
+      - --revision=e5cf08aadaa33385f5990def41f7a23405aec398
       - --dtype=float16
       # Défaut 32 : rejetterait tout --embed-batch plus large avec un 413.
       - --max-client-batch-size=512

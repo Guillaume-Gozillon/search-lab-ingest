@@ -202,6 +202,7 @@ flowchart TD
     L4["GPU passthrough is opt-in at startup"] --> I4["a CPU-only run is ~6× slower<br/>and reports nothing"]
     L5["EMBED_QUERY_PREFIX has no consumer here"] --> I5["enabling prefixes only does half the job<br/>the search side must match"]
     L6["--recreate re-embeds all 1.4M titles"] --> I6["iterating on the mapping costs a full<br/>embedding run → an embedding cache would fix it"]
+    L7["TEI pinned to a July 2025 model revision"] --> I7["upstream main does not parse under TEI<br/>→ revisit the pin, do not assume it is stale"]
 
     style L1 fill:#e67e22,color:#fff
     style L2 fill:#e67e22,color:#fff
@@ -209,6 +210,7 @@ flowchart TD
     style L4 fill:#e67e22,color:#fff
     style L5 fill:#c0392b,color:#fff
     style L6 fill:#e67e22,color:#fff
+    style L7 fill:#e67e22,color:#fff
 ```
 
 **On L1 —** the single-thread stall that used to cap the pipeline at ~500 docs/s is gone:

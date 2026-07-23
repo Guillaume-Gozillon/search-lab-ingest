@@ -227,6 +227,17 @@ make ingest BACKEND=tei
 
 The image tag matters: `120-1.9.3` is the Blackwell / compute-capability-12.0 build for an RTX 50X0. `latest` targets Ampere 8.0 and `89-*` targets Ada — neither starts on sm_120. HuggingFace marks the 12.0 variant experimental.
 
+**The model revision is pinned, and has to be.** `main` of `nomic-ai/nomic-embed-text-v1.5` does not start under TEI:
+
+```
+Error: Failed to parse `config.json`
+Caused by: duplicate field `max_position_embeddings` at line 42 column 15
+```
+
+The upstream commit *v5 Transformers* (2026-04-07) added `max_position_embeddings` to a `config.json` that already declared `n_positions`. TEI aliases the two onto the same field, so serde sees a duplicate and the parse fails before a single weight is loaded. The compose file pins `e5cf08aa` — the last commit before that change. Same weights, `1_Pooling/config.json` still says `pooling_mode_mean_tokens: true`, so the vectors stay comparable to Ollama's. Drop the pin once upstream fixes the config, not before.
+
+One consequence: Ollama serves whatever revision it ships, TEI now serves a July 2025 one. They should still match — that is what `make compare` is for, and it matters more now than it did, not less.
+
 **Verify before you switch an index you care about:**
 
 ```bash
