@@ -177,6 +177,12 @@ engine produce meaningful vectors* — cheap, and worthless after the fact. The 
 asks *does this graph retrieve them* — expensive, and meaningless before the index exists.
 Either one alone would have missed the failure the other catches.
 
+The pre-flight's accuracy rests entirely on its probe set, which is why that set has tests
+of its own (`tests/test_preflight.py`, no service required). Its groups are variants of a
+single object — four headphones, four office chairs — never four items off one shelf: an
+embedding model clusters by nature of object, not by shopping intent, so an aisle-based set
+[refuses healthy engines](README.md#the-probe-set-is-the-hard-part-not-the-check).
+
 No force merge: `VECTOR_MAX_SEGMENTS` is `None`, for the reasons in
 [the README](README.md#recall--is-the-index-actually-searchable) — at the cost of 9 GB of
 `_recovery_source` that never gets purged, which is

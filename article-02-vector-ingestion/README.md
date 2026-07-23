@@ -267,12 +267,32 @@ That hole is now closed by `embeddings/preflight.py`, which runs **before** the 
 
 ```
 Preflight — tei — 768d, nearest neighbour in-theme 100%, intra 0.6254 / inter 0.3602
-                  (separation +0.2652) over 24 titles in 6 themes
+                  (separation +0.2652) over 9 titles in 3 themes
 ```
 
 It embeds two dozen product titles grouped into six disjoint themes and checks that each title's nearest neighbour stays inside its own theme. One embedding call, about two seconds — because finding out the engine is broken must not cost nine minutes of embedding followed by a gate at the end. It also catches an unreachable backend, a dimension mismatch against the mapping, and an engine collapsing distinct inputs onto the same vector.
 
 The floors are 80 % in-theme neighbours and a separation of +0.05. Like `min_recall`, they are floors for *broken*, not targets for *good* — the two engines measured sit at 11 %/−0.008 and 100 %/+0.265, so anything in between separates them without risking a false alarm. Raising them will not improve anything; that is not what they measure.
+
+#### The probe set is the hard part, not the check
+
+The arithmetic above is twenty lines. Choosing the titles took two attempts, and the first one failed in the most instructive way: it **refused a healthy engine**. Groups built by store aisle — *car maintenance*, *baby gear*, *cookware* — scored TEI at 71 %, under the floor, on the same backend that had just built a working 1.4M index.
+
+The engine was right and the probe set was wrong. Look at what the failures actually were:
+
+| Title | Nearest neighbour found | cos | Best in its own group |
+|---|---|---|---|
+| Silicone Baking **Mat** *(cookware)* | Memory Foam Bath **Mat** *(bath linen)* | 0.5803 | 0.4911 |
+| Windshield **Wiper** Blades *(car)* | Cotton **Washcloths** Face Towels *(bath linen)* | 0.4921 | 0.4590 |
+| Engine Oil Filter Wrench *(car)* | Baby Bottle Sterilizer *(baby gear)* | 0.4744 | 0.4590 |
+
+The signal is the last column. *Windshield Wiper Blades* and *Engine Oil Filter Wrench* resemble each other at 0.4590 — because they do not resemble each other. They share a shelf, not a meaning. **An embedding model groups by nature of object and material; a shop groups by intent to purchase.** A baking mat really is close to a bath mat, and the model is not wrong to say so.
+
+The fix was to rebuild every group as variants of *one object* — four headphones, four office chairs — with no vocabulary shared across groups. Same engine, same code, separation back from +0.0973 to the +0.2652 the floors were calibrated against.
+
+The tempting fix, lowering the floor to 70 %, would have traded a false positive for a false negative. The false positive costs a puzzled ten minutes; the false negative costs 1.4M unusable vectors served for a week. The floors did not move.
+
+`tests/test_preflight.py` now guards the probe set itself, without needing a GPU: every group must share a head noun, no content word may appear in two groups, and the whole set must cluster correctly under a **bag-of-words** backend that sees only the strings. That last one is the useful one — plain word overlap sorts the current set at 100 % / +0.2741, the retired aisle set at 25 % / +0.0189. A probe set a bag of words cannot sort has no business judging an embedding model.
 
 `--skip-checks` (or `make ingest SKIP_CHECKS=1`) turns it off for fast iteration. It is not the default and should not become it.
 

@@ -27,6 +27,7 @@ brings up the containers. There is no manual venv step — every target depends 
 | `make stop` | stop the containers, **keep** the volumes (ES data, HF model cache) |
 | `make clean` | stop and **delete** the volumes and the venv |
 | `make status` / `make logs` | `compose ps` / follow the logs |
+| `make test` | check the semantic gate's probe set — mocked backends, no service needed |
 
 - Elasticsearch — `http://localhost:9200` (plain HTTP, security disabled: local lab, not a deployment)
 - Kibana — `http://localhost:5601`
@@ -121,6 +122,8 @@ search-lab-ingest/
 │   │   ├── preflight.py                 # is the engine producing meaningful vectors?
 │   │   └── backends/                    # tei, selected by EMBED_BACKEND
 │   └── pipeline.py                      # main entry point
+├── tests/
+│   └── test_preflight.py                # guards the probe set — mocked, no GPU needed
 ├── docker/
 │   ├── docker-compose.yml               # ES, Kibana, text-embeddings — no GPU config
 │   └── docker-compose.gpu.yml           # NVIDIA passthrough, layered on when detected

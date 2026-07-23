@@ -20,7 +20,7 @@ COMPOSE = docker compose $(COMPOSE_FILES) --env-file .env
 
 PIPELINE = article-02-vector-ingestion/pipeline.py
 
-.PHONY: start stop restart status logs clean up down venv env dry-run ingest format format-check
+.PHONY: start stop restart status logs clean up down venv env dry-run ingest test format format-check
 
 ## Tout démarrer : .env + venv + dépendances + Docker (ES, Kibana, text-embeddings)
 start: env venv
@@ -79,6 +79,11 @@ venv: .venv/.installed
 # Alias historiques
 up: start
 down: stop
+
+## Contrôle du jeu de sondes de la porte sémantique. Aucun service requis : les
+## backends sont mockés, ça tourne sur n'importe quelle machine en une seconde.
+test: venv
+	$(PYTHON) -m pytest tests/ -q
 
 format: venv
 	$(BLACK) . --exclude '\.venv|__pycache__'

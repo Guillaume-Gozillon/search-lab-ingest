@@ -13,12 +13,16 @@ that were, measurably, unrelated to the text they came from:
 So this module checks the one thing nothing else does: that similar texts come back with
 similar vectors and dissimilar texts do not. It embeds a small fixed set of product titles
 grouped by theme, and asks whether each title's nearest neighbour stays inside its own
-group. Measured on the two engines this project has run:
+group. Measured on the two engines this project has run, over a tight 3x3 calibration set:
 
     | engine | intra-theme | inter-theme | separation | nearest neighbour correct |
     |--------|-------------|-------------|------------|---------------------------|
     | broken | 0.8013      | 0.8097      | -0.0083    | 11%  (worse than chance)  |
     | sound  | 0.6254      | 0.3602      | +0.2652    | 100%                      |
+
+The gap between those two rows is the whole margin this check lives on, and it is only
+that wide if the probe set is well built — see the design rule above `PROBE_GROUPS`. A
+loosely grouped set collapsed it to +0.0973 on the *sound* engine and failed the run.
 
 It costs one embedding call of a couple of dozen short strings — call it two seconds. That
 is the point: finding out the engine is broken must not cost nine minutes of embedding
@@ -35,46 +39,63 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# Six domaines volontairement disjoints, quatre titres chacun, dans le style du dataset.
-# Le contenu importe moins que la séparation : deux titres du même groupe doivent se
-# ressembler davantage que deux titres de groupes différents. Éviter les mots partagés
-# entre groupes (« microfiber », « stainless steel ») qui créeraient de fausses collisions.
+# RÈGLE DE CONCEPTION — grouper par NATURE D'OBJET, jamais par RAYON DE MAGASIN.
+#
+# À l'intérieur d'un groupe, les titres doivent être des déclinaisons du *même objet* :
+# quatre casques audio, quatre chaises de bureau. Pas quatre articles du même rayon.
+#
+# C'est l'erreur qui vient naturellement à l'esprit, et elle a été commise ici en
+# 2026-07 : un jeu « car maintenance / baby gear / cookware… » recalait TEI à 71 %,
+# sous le plancher de 80 %. Le moteur était sain — c'est le jeu qui était faux. Un
+# essuie-glace et une clé à filtre partagent un rayon, pas une sémantique : ils ne se
+# ressemblaient qu'à 0,4590, moins que « Windshield Wiper » et « Cotton Washcloths »
+# (0,4921). Un modèle d'embedding regroupe par nature d'objet et par matière, pas par
+# intention d'achat, et un tapis de cuisson est proche d'un tapis de bain.
+#
+# Deux conséquences pratiques, toutes deux vérifiées par tests/test_preflight.py :
+#   - chaque groupe partage un mot-tête (« headphones », « yoga mat ») ; l'ancien jeu
+#     n'en partageait AUCUN, signature purement lexicale de l'erreur ;
+#   - aucun mot de contenu n'est partagé entre deux groupes. « Mat » vivait dans
+#     cookware et bath linen à la fois — le test l'aurait attrapé sans modèle.
+#
+# Effet mesuré sur le même backend TEI : séparation +0,0973 (jeu par rayon) contre
+# +0,2652 (jeu serré). Le plancher n'a pas bougé ; c'est la marge qui est revenue.
 PROBE_GROUPS: dict[str, list[str]] = {
-    "audio": [
+    "headphones": [
         "Wireless Bluetooth Over-Ear Headphones with Active Noise Cancelling",
-        "Portable Bluetooth Speaker Waterproof for Outdoor Parties",
-        "In-Ear Wired Earbuds with Microphone and Inline Volume Control",
-        "USB Condenser Microphone for Podcast and Streaming Recording",
+        "Wired Studio Headphones for Monitoring and Mixing",
+        "Gaming Headphones Over-Ear with Detachable Boom Mic",
+        "Hi-Fi Stereo Headphones for Audiophile Listening",
     ],
-    "cookware": [
-        "Nonstick Frying Pan Set with Stay-Cool Handles",
-        "Cast Iron Dutch Oven Enameled 6 Quart with Lid",
-        "Silicone Baking Mat Reusable Cookie Sheet Liner",
-        "Wooden Cutting Board Bamboo with Juice Groove",
+    "running shoes": [
+        "Mens Running Shoes Breathable Knit Upper Athletic Sneakers",
+        "Womens Running Shoes Cushioned Midsole Road Sneakers",
+        "Trail Running Shoes Rugged Traction Outsole",
+        "Barefoot Running Shoes Zero Drop Wide Toe Box Sneakers",
     ],
-    "bath linen": [
-        "Organic Cotton Bath Towel Set 6 Piece Hotel Quality",
-        "Quick Dry Beach Towel Extra Large Sand Free",
-        "Cotton Washcloths 12 Pack Soft Face Towels",
-        "Memory Foam Bath Mat Non-Slip Highly Absorbent",
+    "coffee makers": [
+        "Drip Coffee Maker 12 Cup Programmable with Glass Carafe",
+        "Single Serve Coffee Maker for K-Cup Pods and Ground Coffee",
+        "French Press Coffee Maker Borosilicate Glass 34 oz",
+        "Stovetop Percolator Coffee Maker with Glass Top Knob",
     ],
-    "pet supplies": [
-        "Orthopedic Dog Bed for Large Breeds with Washable Cover",
-        "Cat Water Fountain Automatic Circulating Pet Drinking",
-        "Retractable Dog Leash 16 ft Heavy Duty Tangle Free",
-        "Interactive Cat Toy Feather Wand with Bells",
+    "yoga mats": [
+        "Yoga Mat Non-Slip Extra Thick with Carrying Strap",
+        "Eco Friendly Yoga Mat Natural Rubber Cork Surface",
+        "Yoga Mat with Alignment Lines Textured Grip Surface",
+        "Wide Yoga Mat Extra Long 84 Inch for Tall Practitioners",
     ],
-    "car maintenance": [
-        "Digital Tire Pressure Gauge with Backlit Display",
-        "Car Jump Starter Portable Battery Booster Pack",
-        "Windshield Wiper Blades 24 Inch All Season",
-        "Engine Oil Filter Wrench Adjustable Removal Tool",
+    "office chairs": [
+        "Ergonomic Office Chair with Lumbar Support and Armrests",
+        "Mesh Back Office Chair Swivel Task Seat with Casters",
+        "Executive Office Chair High Back Leather Reclining",
+        "Drafting Office Chair Tall with Foot Ring",
     ],
-    "baby gear": [
-        "Baby Onesies Short Sleeve 5 Pack Newborn Bodysuits",
-        "Diaper Bag Backpack with Insulated Bottle Pockets",
-        "Baby Bottle Sterilizer and Dryer Electric",
-        "Infant Head and Body Support Cushion for Strollers",
+    "electric toothbrushes": [
+        "Electric Toothbrush Rechargeable with 4 Replacement Brush Heads",
+        "Sonic Electric Toothbrush with Pressure Sensor and Timer",
+        "Electric Toothbrush for Kids Soft Bristles with Fun Timer",
+        "Electric Toothbrush with USB Charging Case for Travel",
     ],
 }
 
@@ -85,6 +106,13 @@ PROBE_GROUPS: dict[str, list[str]] = {
 # pas ce qu'ils mesurent.
 MIN_NEIGHBOUR_RATE = 0.80
 MIN_SEPARATION = 0.05
+
+# Ce qu'un moteur sain doit atteindre sur un jeu de sondes correct — pas un seuil, une
+# cible de conception. Si un jeu de sondes n'y arrive pas sur un moteur qui fonctionne,
+# c'est le jeu qu'il faut resserrer, jamais MIN_SEPARATION qu'il faut baisser : troquer
+# un faux positif contre un faux négatif, c'est rouvrir la porte à 1,4 M de vecteurs
+# inutilisables. Le jeu par rayon plafonnait à +0,0973, d'où cette cible explicite.
+HEALTHY_SEPARATION = 0.20
 
 # Deux textes différents qui reviennent au-dessus de ce cosinus sont le même vecteur. Le
 # moteur cassé rendait 5 vecteurs distincts pour 9 textes distincts — en appels groupés
