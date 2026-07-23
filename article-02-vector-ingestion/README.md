@@ -110,6 +110,9 @@ delete it once you're satisfied. Query `products_embeddings`, never a versioned 
 
 ## Verifying an index
 
+The pipeline now runs these checks itself before moving the alias — see [the gate](#the-gate).
+What follows is how to run them by hand against an index that already exists.
+
 A run that died midway leaves an index that *looks* populated, and `docs.count` alone will
 not tell you. Three checks, cheapest first.
 
@@ -168,16 +171,55 @@ article-02-vector-ingestion/
 4. Transforms each row, skipping rows with no ASIN or no title
 5. Buffers documents into batches of 128, sends titles to Ollama `/api/embed`, attaches the returned vectors as `embedding`
 6. Bulk-indexes with `chunk_size=2000` via `streaming_bulk`
-7. Restores settings (`refresh_interval: 1s`, `replicas: 1`) and refreshes
-8. Force merges to 1 segment per shard
+7. Restores settings (`refresh_interval: 1s`, `replicas: ES_REPLICAS`) and refreshes
+8. Measures recall against an exact scan — **and refuses to publish a build that fails**
 9. Points the `products_embeddings` alias at the index it just wrote
+
+There is deliberately no force merge — see [Recall](#recall--is-the-index-actually-searchable).
 
 ## Embedding choices
 
 - **Model:** `nomic-embed-text` — 768 dims, open-weights, runs on CPU or GPU via Ollama.
 - **Field:** `title` only. Short, descriptive, and the field most users would search semantically.
 - **Similarity:** `cosine` — the default for normalized text embeddings.
-- **Index type:** ES 9.x default for `dense_vector` with `index: true` — HNSW with `int8_hnsw` quantization (4× memory reduction with negligible recall loss).
+- **Index type:** `int8_hnsw` with `m: 32`, `ef_construction: 200`. ES 9 would default to `m: 16, ef_construction: 100`, which measurably under-serves 1.4M vectors — the explicit values are worth their indexing cost, see below.
+
+## Recall — is the index actually searchable?
+
+Counting documents proves nothing about search. An index can hold every document, each with a valid 768-float unit vector, and still fail to return them: the kNN query walks an HNSW graph, and how well that graph was built is invisible to `docs.count`. So the pipeline measures it, and the numbers below are what the settings are chosen from.
+
+### Measuring it honestly
+
+Recall is measured against an exact brute-force scan of the same index. The subtlety is **which queries** you probe with. Hand-written text queries are a trap here: on this dataset, a query like `"wireless bluetooth headphones for running"` has its ranks 2–10 sitting within 0.04 cosine of each other, so thousands of the 1.4M documents are effectively tied. Recall@10 then measures which of the near-ties the ANN happened to pick, not whether it works — and it swings wildly for reasons that have nothing to do with the index.
+
+The fix is to probe with **the embedding of a document drawn from the index**. That document is its own nearest neighbour, so the neighbourhood is real and well separated. This is what `shared/es/verify.py` does, and what the table below uses.
+
+### What actually moves the needle
+
+100 000 documents sampled across the whole CSV (every 14th row — the file is ordered by category, so a head slice covers 15 categories instead of 246). Recall@10 over 30 probes, against exact search:
+
+| index_options | force merge | segments | ef=100 | ef=100 +oversample 4 | ef=500 +oversample 4 |
+|---|---|---|---|---|---|
+| ES 9 defaults | no | 4 | 85 % | 92 % | 95 % |
+| ES 9 defaults | to 1/shard | 2 | 82 % | 87 % | 93 % |
+| **m=32, ef_c=200** | **no** | 4 | **92 %** | **100 %** | **100 %** |
+| m=32, ef_c=200 | to 1/shard | 2 | 87 % | 97 % | 100 % |
+
+Three findings, in order of value:
+
+- **`rescore_vector` costs nothing and buys the most.** Oversampling retrieves extra candidates on the quantized vectors then rescores them at full precision. It is a *query-time* option — no rebuild, no reindex — and it is worth +7 to +8 points:
+  ```json
+  { "knn": { "field": "embedding", "query_vector": [...], "k": 10,
+             "num_candidates": 500, "rescore_vector": { "oversample": 4 } } }
+  ```
+- **Raising `m` and `ef_construction` is worth ~7 points** for about 16 % more indexing time. Hence the explicit `index_options` in the mapping.
+- **Force merging to one segment costs ~5 points.** Each segment carries its own HNSW graph and Elasticsearch searches every one of them with the full `num_candidates` budget, so collapsing to a single segment shrinks the exploration a query gets. It also costs 25 s and buys nothing this index needs, so `VECTOR_MAX_SEGMENTS` in `pipeline.py` is `None`. If you ever re-enable it, target several segments per shard — never 1.
+
+### The gate
+
+`verify_vector_index` runs after the build and before the alias moves. It checks coverage, then probes recall, and a build that falls under the floor **does not get published**: the alias keeps serving the previous index and the run exits non-zero. Roughly 35 s per probe on 1.4M documents, five probes by default.
+
+The floor is set at 40 %, deliberately a bar for *broken* rather than a target for *good*. Repeated runs against the 1.4M index land anywhere between 63 % and 90 % depending on which documents get drawn — five probes is a coarse instrument, and that spread is the reason the floor sits well below the observed range. Treat a passing gate as "the graph retrieves", never as "the recall is tuned"; use the table above for that.
 
 ## Performance notes
 

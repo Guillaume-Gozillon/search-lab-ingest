@@ -13,6 +13,11 @@ ES_ALIAS: str = os.getenv("ES_ALIAS", "products")
 # Alias distinct de ES_ALIAS : l'index vectoriel a son propre cycle de vie.
 ES_EMBEDDINGS_ALIAS: str = os.getenv("ES_EMBEDDINGS_ALIAS", "products_embeddings")
 
+# Réplicas rétablis après un import. Le lab tourne sur un nœud unique : demander un
+# réplica le laisserait non assigné et l'index en yellow indéfiniment. À monter à 1 sur
+# un vrai cluster.
+ES_REPLICAS: int = int(os.getenv("ES_REPLICAS", "0"))
+
 OLLAMA_URL: str = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_EMBED_MODEL: str = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 OLLAMA_EMBED_DIMS: int = int(os.getenv("OLLAMA_EMBED_DIMS", "768"))
